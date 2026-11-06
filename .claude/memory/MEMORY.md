@@ -1,0 +1,2 @@
+- [Google Routes e Static Maps](google_api_facts.md) — eco-routing richiede TRAFFIC_AWARE_OPTIMAL (SKU Pro), Italia coperta, limiti Static API, termini SEE, render free tier; staticDuration e latenza da verificare con una chiamata reale
+- [Scelte di rendering](rendering_decisions.md) — fit con summed-area table, disegno dopo il dither, cap height GFX = -yOffset, punta del segnaposto, logo Google nativo, assi delle icone Material
