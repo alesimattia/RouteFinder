@@ -9,6 +9,8 @@ L'immagine è una mappa Google con il tracciato più veloce in rosso, l'alternat
 | Percorso | Uso |
 |---|---|
 | `GET /route` | immagine del percorso, richiede il token |
+| `GET /example` | griglia PNG con l'immagine in ogni palette e dither, richiede il token |
+| `GET /` | rimanda a `/docs`, la documentazione interattiva dei parametri |
 | `GET /health` | liveness probe e bersaglio del pre-warm del firmware, aperto |
 | `GET /auth`, `POST /auth` | pagina in cui incollare il token da browser |
 
@@ -23,7 +25,9 @@ Parametri di `/route`:
 | `colors` | `bwr` con `arduino`; nessuno con `jpg`, a colori pieni | `bw`, `bwr`, `bwry` |
 | `dither` | `floyd` con `arduino`, con ogni `colors`; nessuno con `jpg`, a soglia se c'è `colors` | `no`, `floyd`, `atkinson`, `bayer` |
 
-Con `format=arduino` il corpo sono i soli piani concatenati, MSB-first, bit a 1 = pixel non di quel colore, nello stesso formato di `/cinema/arduino` della webapp: `Content-Length = piani * ceil(width/8) * height`, per esempio 44660 byte a 610x290 `bwr`. Nessuna compressione su questo percorso, perchè il firmware confronta il `Content-Length`. Con `format=jpg` senza `colors` l'immagine è a colori pieni, con la mappa nei colori di Google. Con `colors` il JPEG è l'anteprima del pannello: mappa in grigi quantizzata come per `arduino`, a soglia se manca `dither`. Un `dither` senza `colors` rimanda con un 307 allo stesso URL con `colors=bwr` aggiunto, così la palette applicata resta visibile nella barra degli indirizzi.
+Con `format=arduino` il corpo sono i soli piani concatenati, MSB-first, bit a 1 = pixel non di quel colore, nello stesso formato di `/cinema/arduino` della webapp: `Content-Length = piani * ceil(width/8) * height`, per esempio 44660 byte a 610x290 `bwr`. Nessuna compressione su questo percorso, perchè il firmware confronta il `Content-Length`. Con `format=jpg` senza `colors` l'immagine è a colori pieni, con la mappa nei colori di Google. Con `colors` il JPEG è l'anteprima del pannello: la stessa mappa a colori convertita nella palette come per `arduino`, a soglia se manca `dither`. Un `dither` senza `colors` rimanda con un 307 allo stesso URL con `colors=bwr` aggiunto, così la palette applicata resta visibile nella barra degli indirizzi.
+
+`/example` disegna un percorso fisso, `ORIGIN` e `DESTINATION` in testa a `examples.py`, e accetta solo `fuel`, `width` e `height`. Restituisce un'unica PNG grande quanto la viewport del browser: aperto senza `width` e `height`, il browser riceve una pagina che rilegge lo stesso URL con le misure della finestra in pixel CSS; da curl o con `width` e `height` vale la misura indicata, di default 1920x1080, al massimo 2560x1600. Dentro ci sono la cella a colori pieni, le palette `bw`, `bwr`, `bwry` con dither `no`, `floyd` e `bayer`, una cella `bwry` con `atkinson` e un riepilogo, in celle piccole quanto basta a stare nella finestra: il numero di colonne si sceglie perchè le celle somiglino al pannello, e sotto ~1440x790 il riquadro informativo non entra più e la risposta è un 400. Sotto ogni cella ci sono il suffisso dell'URL `/route` che la riproduce, tempo e RAM di generazione e il peso del corpo di `/route` a 1280x1280 (esatto per `arduino`, stimato per il JPEG). Ogni richiesta fa una chiamata alla Routes API (nessuna se il percorso è in cache) e una alla Static API: la base a colori, che ogni cella converte nella sua palette.
 
 ## Autenticazione
 
@@ -56,8 +60,9 @@ I test sostituiscono le API Google con fixture, quindi girano senza chiave.
 | `routes_api.py` | `computeRoutes` con field mask minimo, parsing della risposta |
 | `polyline.py` | decodifica dell'encoded polyline |
 | `map_fit.py` | proiezione Web Mercator, scelta di zoom e centro con il tracciato fuori dalle zone vietate |
-| `static_map.py` | base cartografica dalla Static API: in grigi per il pannello, nei colori di Google per il JPEG |
+| `static_map.py` | base cartografica dalla Static API, nei colori di Google per ogni formato |
 | `renderer.py` | composizione di base, tracciati, simboli e riquadro |
+| `examples.py` | griglia di `/example` con le misure di ogni cella |
 | `gfx_font.py`, `material_icons.py` | testo e icone a 1 bit |
 | `dithering.py`, `arduino_format.py`, `cache.py` | copie della webapp, da tenere allineate |
 

@@ -39,21 +39,6 @@ STYLE_CONTENT = (
     "feature:administrative|element:geometry|visibility:off",
 )
 
-# Colori per il pannello a tre colori: fondo bianco, strade in grigi che il
-# dither rende come trame, e il rosso libero per il tracciato. Il JPEG non li
-# applica e tiene i colori di Google.
-STYLE_GRAY = (
-    "saturation:-100",
-    "feature:administrative.locality|element:labels.text.fill|color:0x000000",
-    "feature:administrative.locality|element:labels.text.stroke|color:0xffffff|weight:4",
-    "feature:landscape|element:geometry|color:0xffffff",
-    "feature:water|element:geometry|color:0xd8d8d8",
-    "feature:road|element:geometry.stroke|visibility:off",
-    "feature:road.highway|element:geometry.fill|color:0x505050",
-    "feature:road.arterial|element:geometry.fill|color:0x909090",
-    "feature:road.local|element:geometry.fill|color:0xc8c8c8",
-)
-
 
 class StaticMapError(RuntimeError):
     """La Static API non ha restituito un'immagine utilizzabile."""
@@ -70,9 +55,10 @@ def scale_for(width: int, height: int) -> int:
     raise ValueError(f"misura oltre {MAX_SIDE} px per lato")
 
 
-def build_params(viewport: Viewport, api_key: str, gray: bool) -> list[tuple[str, str]]:
-    """Parametri della richiesta; lista di coppie perchè style si ripete. Con
-    gray la base è in grigi per il pannello, altrimenti nei colori di Google."""
+def build_params(viewport: Viewport, api_key: str) -> list[tuple[str, str]]:
+    """Parametri della richiesta; lista di coppie perchè style si ripete. La
+    base è nei colori di Google per ogni formato: la palette del pannello la
+    applica il renderer."""
     size_w = math.ceil(viewport.width / viewport.scale)
     size_h = math.ceil(viewport.height / viewport.scale)
     params = [
@@ -85,16 +71,16 @@ def build_params(viewport: Viewport, api_key: str, gray: bool) -> list[tuple[str
         ("language", "it"),
         ("region", "IT"),
     ]
-    params.extend(("style", s) for s in STYLE_CONTENT + (STYLE_GRAY if gray else ()))
+    params.extend(("style", s) for s in STYLE_CONTENT)
     params.append(("key", api_key))
     return params
 
 
-def fetch_base_map(viewport: Viewport, api_key: str, gray: bool,
+def fetch_base_map(viewport: Viewport, api_key: str,
                    session: Optional[requests.Session] = None) -> Image.Image:
     """
-    Scarica la base a centro e zoom del viewport, in grigi per il pannello o nei
-    colori di Google per il JPEG, e la porta alla misura esatta.
+    Scarica la base a centro e zoom del viewport, nei colori di Google, e la
+    porta alla misura esatta.
 
     Con scale=2 e una misura dispari la Static API restituisce un pixel in più:
     si toglie a destra e in basso, e il logo in basso a sinistra resta intero.
@@ -102,7 +88,7 @@ def fetch_base_map(viewport: Viewport, api_key: str, gray: bool,
     http = session or requests
     started = time.monotonic()
     try:
-        response = http.get(ENDPOINT, params=build_params(viewport, api_key, gray), timeout=REQUEST_TIMEOUT_S)
+        response = http.get(ENDPOINT, params=build_params(viewport, api_key), timeout=REQUEST_TIMEOUT_S)
     except requests.RequestException as exc:
         raise StaticMapError(f"Static API non raggiungibile: {exc}") from exc
     elapsed_ms = (time.monotonic() - started) * 1000

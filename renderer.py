@@ -221,21 +221,27 @@ def _markers(route: RouteInfo, scale: int) -> list[Marker]:
     ]
 
 
-def render_route_image(
-    result: RouteResult,
-    width: int,
-    height: int,
-    fmt: str,
-    color_mode: str,
-    dither: str,
-    fetch_map: Callable[[Viewport], Image.Image],
-) -> bytes:
+@dataclass(frozen=True)
+class RouteLayout:
     """
-    Immagine finale: JPEG se fmt è "jpg", a colori pieni con color_mode "rgb" e
-    nella palette del pannello altrimenti; con "arduino" i piani e-paper
-    header-less di arduino_format. ValueError se il riquadro non entra nella
-    misura richiesta.
+    Geometria dell'immagine, uguale per ogni palette e dither: scale della
+    Static API, righe e posizione del riquadro, viewport della mappa. Separata
+    dal disegno perchè examples.py scarica una base sola per viewport e la riusa
+    in tutte le celle.
     """
+
+    scale: int
+    rows: list[CardRow]
+    card_left: int
+    card_top: int
+    card_w: int
+    card_h: int
+    viewport: Viewport
+
+
+def route_layout(result: RouteResult, width: int, height: int) -> RouteLayout:
+    """Riquadro in alto a destra e fit della mappa con il tracciato fuori dalle
+    zone vietate; ValueError se il riquadro non entra nella misura richiesta."""
     scale = scale_for(width, height)
     rows = card_rows(result)
     card_w, card_h = (v * scale for v in card_size(rows))
@@ -252,17 +258,26 @@ def render_route_image(
     paths = [result.fastest.points] + ([result.eco.points] if result.eco else [])
     viewport = fit_viewport(paths, _markers(result.fastest, scale), width, height, forbidden,
                             margin=margin, padding=LINE_PADDING * scale, scale=scale)
-    base = fetch_map(viewport)
+    return RouteLayout(scale, rows, card_left, card_top, card_w, card_h, viewport)
 
+
+def compose_route_image(result: RouteResult, layout: RouteLayout, base: Image.Image,
+                        color_mode: str, dither: str) -> Image.Image:
+    """
+    Immagine prima della codifica: "RGB" a colori pieni con color_mode "rgb",
+    "P" nella palette del pannello altrimenti. `base` è la mappa del viewport di
+    `layout` e non viene modificata, quindi si può riusare fra più chiamate.
+    """
+    scale = layout.scale
+    viewport = layout.viewport
     mode, colors = _color_table(color_mode)
     if mode == "RGB":
         image = base.convert("RGB")
     else:
-        # La base è in grigi per costruzione (STYLE_GRAY), quindi si quantizza su
-        # bianco e nero, indici 0 e 1 in ogni palette: rosso e giallo restano a
-        # tracciati, testo e icone. Verso bwr il Floyd-Steinberg di Pillow sceglie
-        # a volte il rosso anche per un grigio puro, soprattutto vicino al bordo destro.
-        image = indices_to_p_image(quantize(base, "bw", dither), color_mode)
+        # La base è la mappa nei colori di Google, convertita nella palette con il
+        # dither richiesto: strade gialle e arancioni possono finire in rosso o in
+        # giallo, come il tracciato.
+        image = indices_to_p_image(quantize(base, color_mode, dither), color_mode)
 
     draw = ImageDraw.Draw(image)
     if result.eco is not None:
@@ -286,14 +301,39 @@ def render_route_image(
     _paste_icon(image, colors, "location_on", side_d, int(round(dx)) - side_d // 2,
                 int(round(dy)) - tip, "black", ICON_HALO * scale)
 
-    card = draw_card(rows, colors, mode)
+    card = draw_card(layout.rows, colors, mode)
     if scale != 1:
-        card = card.resize((card_w, card_h), Image.NEAREST)
-    image.paste(card, (card_left, card_top))
+        card = card.resize((layout.card_w, layout.card_h), Image.NEAREST)
+    image.paste(card, (layout.card_left, layout.card_top))
+    return image
 
+
+def encode_jpeg(image: Image.Image) -> bytes:
+    """JPEG di /route, qualità JPEG_QUALITY; lo usa anche examples.py per stimare
+    il peso a piena misura."""
+    buffer = io.BytesIO()
+    # Pillow non scrive in JPEG un'immagine a palette.
+    image.convert("RGB").save(buffer, format="JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=False, progressive=True)
+    return buffer.getvalue()
+
+
+def render_route_image(
+    result: RouteResult,
+    width: int,
+    height: int,
+    fmt: str,
+    color_mode: str,
+    dither: str,
+    fetch_map: Callable[[Viewport], Image.Image],
+) -> bytes:
+    """
+    Immagine finale: JPEG se fmt è "jpg", a colori pieni con color_mode "rgb" e
+    nella palette del pannello altrimenti; con "arduino" i piani e-paper
+    header-less di arduino_format. ValueError se il riquadro non entra nella
+    misura richiesta.
+    """
+    layout = route_layout(result, width, height)
+    image = compose_route_image(result, layout, fetch_map(layout.viewport), color_mode, dither)
     if fmt == "jpg":
-        buffer = io.BytesIO()
-        # Pillow non scrive in JPEG un'immagine a palette.
-        image.convert("RGB").save(buffer, format="JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=False, progressive=True)
-        return buffer.getvalue()
+        return encode_jpeg(image)
     return encode_arduino(np.array(image, dtype=np.uint8), color_mode=color_mode)

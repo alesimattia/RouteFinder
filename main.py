@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Literal, Optional
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
@@ -16,8 +17,10 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 import auth
 from cache import TTLCache
+from examples import DEFAULT_CANVAS, MAX_CANVAS, VIEWPORT_PAGE, render_examples
+from examples import DESTINATION as EXAMPLE_DESTINATION, ORIGIN as EXAMPLE_ORIGIN
 from renderer import render_route_image
-from routes_api import RoutesError, compute_routes
+from routes_api import RouteResult, RoutesError, compute_routes
 from static_map import MAX_SIDE, StaticMapError, fetch_base_map
 
 
@@ -44,10 +47,10 @@ app = FastAPI(
 
 
 class _ConditionalGZipMiddleware:
-    """GZip per le pagine testuali, mai su /route: il firmware confronta il
-    Content-Length con la misura attesa, e il JPEG è già compresso."""
+    """GZip per le pagine testuali, mai sulle immagini: il firmware confronta il
+    Content-Length di /route con la misura attesa, e JPEG e PNG sono già compressi."""
 
-    _SKIP_PATHS = frozenset({"/route"})
+    _SKIP_PATHS = frozenset({"/route", "/example"})
 
     def __init__(self, app: ASGIApp, **kwargs):
         self._gzip = GZipMiddleware(app, **kwargs)
@@ -95,10 +98,44 @@ def _unauthorized(request: Request) -> Response:
     return Response(status_code=401, headers={"WWW-Authenticate": f'Token header="{auth.HEADER_NAME}"'})
 
 
+def _endpoints(origin: Optional[str], destination: Optional[str]) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Partenza e arrivo validati, comuni a /route e /example; 400 se mancano."""
+    if origin is None or destination is None:
+        raise HTTPException(status_code=400, detail="origin e destination sono obbligatori")
+    return parse_point(origin, "origin"), parse_point(destination, "destination")
+
+
+def _check_size(width: int, height: int) -> None:
+    """400 fuori dai limiti, mai un clamp silenzioso: il firmware confronta il Content-Length."""
+    if not (MIN_SIDE <= width <= MAX_SIDE and MIN_SIDE <= height <= MAX_SIDE):
+        raise HTTPException(status_code=400, detail=f"misura fra {MIN_SIDE} e {MAX_SIDE} px per lato")
+
+
+def _cached_route(origin_point: tuple[float, float], destination_point: tuple[float, float],
+                  fuel: str) -> tuple[RouteResult, Optional[float]]:
+    """Percorso dalla cache di ROUTE_CACHE_TTL_S o da una chiamata alla Routes
+    API; il secondo valore è la durata della chiamata, None se non c'è stata.
+    /example la mostra nel riepilogo."""
+    api_key = _api_key()
+    elapsed: list[float] = []
+
+    def call() -> RouteResult:
+        started = time.perf_counter()
+        value = compute_routes(origin_point, destination_point, fuel, api_key)
+        elapsed.append(time.perf_counter() - started)
+        return value
+
+    try:
+        result = _route_cache.get_or_compute((origin_point, destination_point, fuel), call)
+    except RoutesError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return result, (elapsed[0] if elapsed else None)
+
+
 @app.get("/")
 def root():
-    """Rimando all'endpoint principale."""
-    return RedirectResponse(url="/route")
+    """Rimando alla documentazione interattiva di FastAPI, con tutti i parametri."""
+    return RedirectResponse(url="/docs")
 
 
 @app.get("/health")
@@ -163,12 +200,8 @@ def route(
     """
     if not auth.is_authorized(request):
         return _unauthorized(request)
-    if origin is None or destination is None:
-        raise HTTPException(status_code=400, detail="origin e destination sono obbligatori")
-    origin_point = parse_point(origin, "origin")
-    destination_point = parse_point(destination, "destination")
-    if not (MIN_SIDE <= width <= MAX_SIDE and MIN_SIDE <= height <= MAX_SIDE):
-        raise HTTPException(status_code=400, detail=f"misura fra {MIN_SIDE} e {MAX_SIDE} px per lato")
+    origin_point, destination_point = _endpoints(origin, destination)
+    _check_size(width, height)
 
     headers = {"Cache-Control": "no-store"}
     if format == "arduino":
@@ -184,20 +217,14 @@ def route(
     else:
         color_mode, dither_mode = colors, dither or "no"
 
+    result, _ = _cached_route(origin_point, destination_point, fuel)
     api_key = _api_key()
-    try:
-        result = _route_cache.get_or_compute(
-            (origin_point, destination_point, fuel),
-            lambda: compute_routes(origin_point, destination_point, fuel, api_key))
-    except RoutesError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-
     image_key = (origin_point, destination_point, fuel, width, height, format, color_mode,
                  dither_mode, result.computed_at.isoformat())
     try:
         body = _image_cache.get_or_compute(image_key, lambda: render_route_image(
             result, width, height, format, color_mode, dither_mode,
-            lambda viewport: fetch_base_map(viewport, api_key, gray=color_mode != "rgb")))
+            lambda viewport: fetch_base_map(viewport, api_key)))
     except StaticMapError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     except ValueError as exc:
@@ -205,3 +232,51 @@ def route(
 
     media_type = "image/jpeg" if format == "jpg" else "application/octet-stream"
     return Response(content=body, media_type=media_type, headers=headers)
+
+
+@app.get("/example")
+def example(
+    request: Request,
+    fuel: Literal["gasoline", "diesel", "hybrid", "electric"] = Query("gasoline"),
+    width: Optional[int] = Query(
+        None, description=f"Larghezza dell'immagine in px, al massimo {MAX_CANVAS[0]}. Dal browser, senza "
+                          "width e height, una pagina li aggiunge all'URL presi dalla viewport; "
+                          f"altrimenti default {DEFAULT_CANVAS[0]}."),
+    height: Optional[int] = Query(
+        None, description=f"Altezza dell'immagine in px, al massimo {MAX_CANVAS[1]}; default {DEFAULT_CANVAS[1]}."),
+):
+    """
+    PNG grande quanto la viewport del browser con la stessa immagine del
+    percorso fisso fra examples.ORIGIN e examples.DESTINATION, a colori pieni e
+    in ogni palette e dither del pannello, in celle piccole quanto basta a stare
+    nella tela, con tempo, RAM e peso a piena misura di ciascuna. Una chiamata
+    alla Routes API (nessuna se il percorso è in cache) e una alla Static API,
+    la base a colori che ogni cella converte nella sua palette.
+    """
+    if not auth.is_authorized(request):
+        return _unauthorized(request)
+    origin_point, destination_point = _endpoints(EXAMPLE_ORIGIN, EXAMPLE_DESTINATION)
+    if width is None and height is None and auth.wants_html(request):
+        # Il server non conosce la viewport: la pagina la legge e torna qui con
+        # width e height, prima di ogni chiamata a pagamento.
+        return HTMLResponse(VIEWPORT_PAGE, headers={"Cache-Control": "no-store"})
+    canvas_w = width if width is not None else DEFAULT_CANVAS[0]
+    canvas_h = height if height is not None else DEFAULT_CANVAS[1]
+    if not (0 < canvas_w <= MAX_CANVAS[0] and 0 < canvas_h <= MAX_CANVAS[1]):
+        raise HTTPException(status_code=400, detail=f"immagine al massimo {MAX_CANVAS[0]}x{MAX_CANVAS[1]} px")
+
+    result, routes_s = _cached_route(origin_point, destination_point, fuel)
+    api_key = _api_key()
+    route_query = (f"/route?origin={origin_point[0]},{origin_point[1]}"
+                   f"&destination={destination_point[0]},{destination_point[1]}&fuel={fuel}")
+    image_key = ("example", origin_point, destination_point, fuel, canvas_w, canvas_h,
+                 result.computed_at.isoformat())
+    try:
+        body = _image_cache.get_or_compute(image_key, lambda: render_examples(
+            result, canvas_w, canvas_h, route_query, routes_s,
+            lambda viewport: fetch_base_map(viewport, api_key)))
+    except StaticMapError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return Response(content=body, media_type="image/png", headers={"Cache-Control": "no-store"})

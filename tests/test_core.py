@@ -174,12 +174,12 @@ def test_arduino_body_length_matches_firmware(height, expected):
     assert len(body) == expected
 
 
-def test_static_map_gray_style_only_for_panel():
+def test_static_map_keeps_google_colors():
+    """Una sola base per ogni formato: solo lo stile del contenuto, nessun
+    colore cambiato, la palette la applica il renderer."""
     viewport = Viewport(43.6, 13.5, 11, 610, 290, 1)
-    gray = [v for k, v in static_map.build_params(viewport, "k", gray=True) if k == "style"]
-    color = [v for k, v in static_map.build_params(viewport, "k", gray=False) if k == "style"]
-    assert color == list(static_map.STYLE_CONTENT)
-    assert gray == list(static_map.STYLE_CONTENT + static_map.STYLE_GRAY)
+    styles = [v for k, v in static_map.build_params(viewport, "k") if k == "style"]
+    assert styles == list(static_map.STYLE_CONTENT)
 
 
 def test_jpeg_render_and_scale_two():
@@ -218,23 +218,16 @@ def test_card_area_is_pure_palette():
     assert inner.all()
 
 
-@pytest.mark.parametrize("colors", ["bwr", "bwry"])
-@pytest.mark.parametrize("dither", ["no", "floyd", "atkinson", "bayer"])
-def test_gray_base_never_adds_accent_pixels(colors, dither):
-    """La base in grigi si quantizza su bianco e nero: i piani d'accento sono
-    quelli dei soli tracciati e del riquadro, uguali a quelli su una base bianca.
-    Il grigio 0x50 è la strada principale di STYLE_GRAY, su cui il Floyd-Steinberg
-    verso bwr lasciava pixel rossi."""
+@pytest.mark.parametrize("colors,rgb,plane", [("bwr", (255, 0, 0), 1), ("bwry", (255, 255, 0), 2)])
+def test_color_base_reaches_palette_accents(colors, rgb, plane):
+    """La base nei colori di Google si converte nella palette completa: un'area
+    rossa o gialla della mappa resta rossa o gialla sul pannello."""
     result = routes_api.parse_response(_route_payload(), NOW)
-    stride = (610 + 7) // 8
-    plane = stride * 290
-
-    def accents(gray):
-        body = renderer.render_route_image(result, 610, 290, "arduino", colors, dither,
-                                           lambda v: Image.new("RGB", (v.width, v.height), (gray,) * 3))
-        return body[plane:]
-
-    assert accents(0x50) == accents(255)
+    body = renderer.render_route_image(result, 610, 290, "arduino", colors, "floyd",
+                                       lambda v: Image.new("RGB", (v.width, v.height), rgb))
+    size = (610 + 7) // 8 * 290
+    bits = np.unpackbits(np.frombuffer(body[plane * size:(plane + 1) * size], dtype=np.uint8))
+    assert (bits == 0).mean() > 0.5
 
 
 def test_too_small_image_is_rejected():

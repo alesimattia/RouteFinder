@@ -6,13 +6,16 @@ import io
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+import examples
 import main
 import renderer
 import routes_api
+from dithering import PALETTES, PLANE_ORDER
 from tests.test_core import _route_payload
 
 
@@ -23,15 +26,15 @@ TOKEN = "segreto-di-test"
 def client(monkeypatch):
     monkeypatch.setenv("ROUTEFINDER_TOKEN", TOKEN)
     monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "chiave-finta")
-    calls = {"routes": 0, "gray": []}
+    calls = {"routes": 0, "maps": 0}
 
     def fake_compute(origin, destination, fuel, api_key):
         calls["routes"] += 1
         return routes_api.parse_response(_route_payload(), datetime(2026, 11, 6, 7, 42, tzinfo=ZoneInfo("Europe/Rome")))
 
     monkeypatch.setattr(main, "compute_routes", fake_compute)
-    def fake_map(viewport, key, gray):
-        calls["gray"].append(gray)
+    def fake_map(viewport, key):
+        calls["maps"] += 1
         return Image.new("RGB", (viewport.width, viewport.height), (230, 230, 230))
 
     monkeypatch.setattr(main, "fetch_base_map", fake_map)
@@ -103,18 +106,11 @@ def test_default_size_is_maximum(client):
     assert Image.open(io.BytesIO(only_width.content)).size == (610, main.MAX_SIDE)
 
 
-def test_jpeg_map_in_color_arduino_in_gray(client):
-    headers = {"X-Routefinder-Token": TOKEN}
-    client.get(QUERY, headers=headers)
-    client.get(QUERY + "&format=arduino", headers=headers)
-    assert client.calls["gray"] == [False, True]
-
-
-def test_jpeg_with_colors_uses_gray_map(client):
+def test_jpeg_with_colors_is_panel_preview(client):
     response = client.get(QUERY + "&colors=bwr&dither=atkinson", headers={"X-Routefinder-Token": TOKEN})
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
-    assert client.calls["gray"] == [True]
+    assert client.calls["maps"] == 1
 
 
 @pytest.mark.parametrize("colors", ["bw", "bwr", "bwry"])
@@ -148,11 +144,11 @@ def test_jpeg_with_dither_only_redirects_to_default_palette(client):
     assert redirect.status_code == 307
     assert redirect.headers["location"] == QUERY + "&dither=atkinson&colors=" + main.DEFAULT_COLORS
     # Il redirect precede ogni chiamata a pagamento.
-    assert client.calls == {"routes": 0, "gray": []}
+    assert client.calls == {"routes": 0, "maps": 0}
     followed = client.get(QUERY + "&dither=atkinson", headers=headers)
     assert followed.status_code == 200
     assert followed.headers["content-type"] == "image/jpeg"
-    assert client.calls["gray"] == [True]
+    assert client.calls["maps"] == 1
     explicit = client.get(QUERY + "&colors=bwr&dither=atkinson", headers=headers)
     assert followed.content == explicit.content
 
@@ -181,3 +177,83 @@ def test_route_cache_avoids_second_google_call(client):
 def test_bad_parameters(client, query):
     response = client.get(query, headers={"X-Routefinder-Token": TOKEN})
     assert response.status_code in (400, 422)
+
+
+def test_root_redirects_to_docs(client):
+    response = client.get("/", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/docs"
+
+
+def test_example_requires_token(client):
+    assert client.get("/example").status_code == 401
+
+
+EXAMPLE = "/example"
+
+
+def test_example_browser_gets_viewport_page_without_google_calls(client):
+    response = client.get(EXAMPLE, headers={"X-Routefinder-Token": TOKEN, "Accept": "text/html"})
+    assert response.status_code == 200
+    assert "window.innerWidth" in response.text and "window.innerHeight" in response.text
+    assert '(location.search ? "&" : "?")' in response.text
+    assert client.calls == {"routes": 0, "maps": 0}
+
+
+def test_example_calls_each_google_api_once_and_caches(client):
+    headers = {"X-Routefinder-Token": TOKEN}
+    response = client.get(EXAMPLE, headers=headers)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert "content-encoding" not in response.headers
+    assert Image.open(io.BytesIO(response.content)).size == examples.DEFAULT_CANVAS
+    assert client.calls == {"routes": 1, "maps": 1}
+    assert client.get(EXAMPLE, headers=headers).content == response.content
+    assert client.calls == {"routes": 1, "maps": 1}
+    # La querystring non sceglie il percorso: origin e destination sono fissi.
+    assert client.get(EXAMPLE + "?origin=1,1&destination=2,2", headers=headers).content == response.content
+
+
+@pytest.mark.parametrize("size", [(1512, 860), (1440, 790), (2560, 1300)])
+def test_example_fills_the_viewport(client, size):
+    response = client.get(EXAMPLE + f"?width={size[0]}&height={size[1]}", headers={"X-Routefinder-Token": TOKEN})
+    assert response.status_code == 200
+    assert Image.open(io.BytesIO(response.content)).size == size
+
+
+@pytest.mark.parametrize("size", [(800, 600), (3000, 1300)])
+def test_example_rejects_canvas_too_small_or_too_large(client, size):
+    response = client.get(EXAMPLE + f"?width={size[0]}&height={size[1]}", headers={"X-Routefinder-Token": TOKEN})
+    assert response.status_code == 400
+
+
+def _decode_planes(body: bytes, colors: str, width: int, height: int) -> np.ndarray:
+    """Piani di format=arduino riportati a RGB, per confrontarli con la griglia."""
+    stride = (width + 7) // 8
+    rgb = np.full((height, width, 3), 255, dtype=np.uint8)
+    for index, channel in enumerate(PLANE_ORDER[colors]):
+        plane = np.frombuffer(body[index * stride * height:(index + 1) * stride * height], dtype=np.uint8)
+        bits = np.unpackbits(plane).reshape(height, stride * 8)[:, :width]
+        rgb[bits == 0] = PALETTES[colors][index + 1]
+    return rgb
+
+
+def test_example_cells_match_route(client):
+    """Ogni cella del pannello è identica, pixel per pixel, ai piani che /route
+    restituisce con gli stessi parametri e la misura della cella."""
+    headers = {"X-Routefinder-Token": TOKEN}
+    canvas = np.array(Image.open(io.BytesIO(client.get(EXAMPLE, headers=headers).content)))
+    origin = main.parse_point(examples.ORIGIN, "origin")
+    destination = main.parse_point(examples.DESTINATION, "destination")
+    result = main._route_cache.get_or_compute((origin, destination, "gasoline"), None)
+    grid = examples.grid_for(result, *examples.DEFAULT_CANVAS)
+    w, h = grid.cell_w, grid.cell_h
+    for index, cell in enumerate(examples.CELLS):
+        if cell is None or cell[0] == "rgb":
+            continue
+        colors, dither = cell
+        body = client.get(f"/route?origin={examples.ORIGIN}&destination={examples.DESTINATION}"
+                          f"&format=arduino&colors={colors}&dither={dither}&width={w}&height={h}",
+                          headers=headers).content
+        x, y = grid.origin(index)
+        assert (canvas[y:y + h, x:x + w] == _decode_planes(body, colors, w, h)).all(), cell
