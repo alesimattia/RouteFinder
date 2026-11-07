@@ -18,12 +18,12 @@ Parametri di `/route`:
 |---|---|---|
 | `origin`, `destination` | obbligatori | `lat,lng` in gradi decimali |
 | `fuel` | `gasoline` | `gasoline`, `diesel`, `hybrid`, `electric` |
-| `width`, `height` | `610`, `290` | da 64 a 1280 px per lato |
-| `format` | `jpg` | `jpg` (colori pieni, niente dither), `arduino` |
-| `colors` | `bwr` | solo con `arduino`: `bw`, `bwr`, `bwry` |
-| `dither` | `floyd` | solo con `arduino`: `no`, `floyd`, `atkinson`, `bayer` |
+| `width`, `height` | la misura massima | da 64 a 1280 px per lato |
+| `format` | `jpg` | `jpg` (qualità 80), `arduino` |
+| `colors` | `bwr` con `arduino`; nessuno con `jpg`, a colori pieni | `bw`, `bwr`, `bwry` |
+| `dither` | `floyd` con `arduino`, con ogni `colors`; nessuno con `jpg`, a soglia se c'è `colors` | `no`, `floyd`, `atkinson`, `bayer` |
 
-Con `format=arduino` il corpo sono i soli piani concatenati, MSB-first, bit a 1 = pixel non di quel colore, nello stesso formato di `/cinema/arduino` della webapp: `Content-Length = piani * ceil(width/8) * height`, per esempio 44660 byte a 610x290 `bwr`. Nessuna compressione su questo percorso, perchè il firmware confronta il `Content-Length`. Con `format=jpg` `colors` e `dither` si ignorano e l'header `X-Routefinder-Warning` lo dice.
+Con `format=arduino` il corpo sono i soli piani concatenati, MSB-first, bit a 1 = pixel non di quel colore, nello stesso formato di `/cinema/arduino` della webapp: `Content-Length = piani * ceil(width/8) * height`, per esempio 44660 byte a 610x290 `bwr`. Nessuna compressione su questo percorso, perchè il firmware confronta il `Content-Length`. Con `format=jpg` senza `colors` l'immagine è a colori pieni, con la mappa nei colori di Google. Con `colors` il JPEG è l'anteprima del pannello: mappa in grigi quantizzata come per `arduino`, a soglia se manca `dither`. Un `dither` senza `colors` rimanda con un 307 allo stesso URL con `colors=bwr` aggiunto, così la palette applicata resta visibile nella barra degli indirizzi.
 
 ## Autenticazione
 
@@ -56,7 +56,7 @@ I test sostituiscono le API Google con fixture, quindi girano senza chiave.
 | `routes_api.py` | `computeRoutes` con field mask minimo, parsing della risposta |
 | `polyline.py` | decodifica dell'encoded polyline |
 | `map_fit.py` | proiezione Web Mercator, scelta di zoom e centro con il tracciato fuori dalle zone vietate |
-| `static_map.py` | base cartografica in grigi dalla Static API |
+| `static_map.py` | base cartografica dalla Static API: in grigi per il pannello, nei colori di Google per il JPEG |
 | `renderer.py` | composizione di base, tracciati, simboli e riquadro |
 | `gfx_font.py`, `material_icons.py` | testo e icone a 1 bit |
 | `dithering.py`, `arduino_format.py`, `cache.py` | copie della webapp, da tenere allineate |

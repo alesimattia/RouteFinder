@@ -25,20 +25,27 @@ ENDPOINT = "https://maps.googleapis.com/maps/api/staticmap"
 # scale=1 sia a scale=2, che raddoppia i pixel a parità di copertura.
 MAX_SIZE = 640
 MAX_SCALE = 2
+# Lato massimo dell'immagine finale, raggiunto a scale=MAX_SCALE.
+MAX_SIDE = MAX_SIZE * MAX_SCALE
 REQUEST_TIMEOUT_S = 15
 
-# Stile pensato per il pannello a tre colori: fondo bianco, strade in grigi
-# che il dither rende come trame, nessun simbolo, e solo i nomi delle località,
-# che orientano senza affollare. Il rosso resta libero per il tracciato.
-STYLE = (
-    "saturation:-100",
+# Contenuto della mappa, uguale per il JPEG e per il pannello: nessun simbolo e
+# solo i nomi delle località, che orientano senza affollare.
+STYLE_CONTENT = (
     "element:labels|visibility:off",
     "feature:administrative.locality|element:labels.text|visibility:on",
-    "feature:administrative.locality|element:labels.text.fill|color:0x000000",
-    "feature:administrative.locality|element:labels.text.stroke|color:0xffffff|weight:4",
     "feature:poi|visibility:off",
     "feature:transit|visibility:off",
     "feature:administrative|element:geometry|visibility:off",
+)
+
+# Colori per il pannello a tre colori: fondo bianco, strade in grigi che il
+# dither rende come trame, e il rosso libero per il tracciato. Il JPEG non li
+# applica e tiene i colori di Google.
+STYLE_GRAY = (
+    "saturation:-100",
+    "feature:administrative.locality|element:labels.text.fill|color:0x000000",
+    "feature:administrative.locality|element:labels.text.stroke|color:0xffffff|weight:4",
     "feature:landscape|element:geometry|color:0xffffff",
     "feature:water|element:geometry|color:0xd8d8d8",
     "feature:road|element:geometry.stroke|visibility:off",
@@ -58,13 +65,14 @@ def scale_for(width: int, height: int) -> int:
         raise ValueError("misura non positiva")
     if width <= MAX_SIZE and height <= MAX_SIZE:
         return 1
-    if width <= MAX_SIZE * MAX_SCALE and height <= MAX_SIZE * MAX_SCALE:
-        return 2
-    raise ValueError(f"misura oltre {MAX_SIZE * MAX_SCALE} px per lato")
+    if width <= MAX_SIDE and height <= MAX_SIDE:
+        return MAX_SCALE
+    raise ValueError(f"misura oltre {MAX_SIDE} px per lato")
 
 
-def build_params(viewport: Viewport, api_key: str) -> list[tuple[str, str]]:
-    """Parametri della richiesta; lista di coppie perchè style si ripete."""
+def build_params(viewport: Viewport, api_key: str, gray: bool) -> list[tuple[str, str]]:
+    """Parametri della richiesta; lista di coppie perchè style si ripete. Con
+    gray la base è in grigi per il pannello, altrimenti nei colori di Google."""
     size_w = math.ceil(viewport.width / viewport.scale)
     size_h = math.ceil(viewport.height / viewport.scale)
     params = [
@@ -77,14 +85,16 @@ def build_params(viewport: Viewport, api_key: str) -> list[tuple[str, str]]:
         ("language", "it"),
         ("region", "IT"),
     ]
-    params.extend(("style", s) for s in STYLE)
+    params.extend(("style", s) for s in STYLE_CONTENT + (STYLE_GRAY if gray else ()))
     params.append(("key", api_key))
     return params
 
 
-def fetch_base_map(viewport: Viewport, api_key: str, session: Optional[requests.Session] = None) -> Image.Image:
+def fetch_base_map(viewport: Viewport, api_key: str, gray: bool,
+                   session: Optional[requests.Session] = None) -> Image.Image:
     """
-    Scarica la base a centro e zoom del viewport e la porta alla misura esatta.
+    Scarica la base a centro e zoom del viewport, in grigi per il pannello o nei
+    colori di Google per il JPEG, e la porta alla misura esatta.
 
     Con scale=2 e una misura dispari la Static API restituisce un pixel in più:
     si toglie a destra e in basso, e il logo in basso a sinistra resta intero.
@@ -92,7 +102,7 @@ def fetch_base_map(viewport: Viewport, api_key: str, session: Optional[requests.
     http = session or requests
     started = time.monotonic()
     try:
-        response = http.get(ENDPOINT, params=build_params(viewport, api_key), timeout=REQUEST_TIMEOUT_S)
+        response = http.get(ENDPOINT, params=build_params(viewport, api_key, gray), timeout=REQUEST_TIMEOUT_S)
     except requests.RequestException as exc:
         raise StaticMapError(f"Static API non raggiungibile: {exc}") from exc
     elapsed_ms = (time.monotonic() - started) * 1000

@@ -15,6 +15,8 @@ import material_icons
 import polyline
 import renderer
 import routes_api
+import static_map
+from dithering import PALETTES
 from map_fit import Marker, Rect, Viewport, fit_viewport, world_to_latlng, world_xy
 
 
@@ -172,12 +174,35 @@ def test_arduino_body_length_matches_firmware(height, expected):
     assert len(body) == expected
 
 
+def test_static_map_gray_style_only_for_panel():
+    viewport = Viewport(43.6, 13.5, 11, 610, 290, 1)
+    gray = [v for k, v in static_map.build_params(viewport, "k", gray=True) if k == "style"]
+    color = [v for k, v in static_map.build_params(viewport, "k", gray=False) if k == "style"]
+    assert color == list(static_map.STYLE_CONTENT)
+    assert gray == list(static_map.STYLE_CONTENT + static_map.STYLE_GRAY)
+
+
 def test_jpeg_render_and_scale_two():
     result = routes_api.parse_response(_route_payload(), NOW)
     for width, height in [(610, 290), (1220, 580)]:
         body = renderer.render_route_image(result, width, height, "jpg", "rgb", "no", _fake_map)
         image = Image.open(__import__("io").BytesIO(body))
         assert image.size == (width, height)
+
+
+@pytest.mark.parametrize("colors", ["bw", "bwr", "bwry"])
+def test_jpeg_with_colors_stays_in_panel_palette(colors):
+    """Con colors il JPEG è l'anteprima del pannello: a meno degli artefatti di
+    compressione ogni pixel è un colore della palette, e il rosso c'è solo se la
+    palette lo ha."""
+    result = routes_api.parse_response(_route_payload(), NOW)
+    body = renderer.render_route_image(result, 610, 290, "jpg", colors, "floyd", _fake_map)
+    pixels = np.array(Image.open(__import__("io").BytesIO(body)), dtype=np.int16)
+    palette = np.array(PALETTES[colors], dtype=np.int16)
+    distance = np.abs(pixels[:, :, None, :] - palette[None, None]).sum(-1).min(-1)
+    assert distance.mean() < 30
+    near_red = (np.abs(pixels - np.array([255, 0, 0])).sum(-1) < 60).any()
+    assert near_red == (colors != "bw")
 
 
 def test_card_area_is_pure_palette():
@@ -191,6 +216,25 @@ def test_card_area_is_pure_palette():
     inner = black[renderer.MARGIN + 4:renderer.MARGIN + card_h - 4, left + 4:left + 8]
     # Margine sinistro interno della card, prima delle icone: tutto bianco (bit a 1).
     assert inner.all()
+
+
+@pytest.mark.parametrize("colors", ["bwr", "bwry"])
+@pytest.mark.parametrize("dither", ["no", "floyd", "atkinson", "bayer"])
+def test_gray_base_never_adds_accent_pixels(colors, dither):
+    """La base in grigi si quantizza su bianco e nero: i piani d'accento sono
+    quelli dei soli tracciati e del riquadro, uguali a quelli su una base bianca.
+    Il grigio 0x50 è la strada principale di STYLE_GRAY, su cui il Floyd-Steinberg
+    verso bwr lasciava pixel rossi."""
+    result = routes_api.parse_response(_route_payload(), NOW)
+    stride = (610 + 7) // 8
+    plane = stride * 290
+
+    def accents(gray):
+        body = renderer.render_route_image(result, 610, 290, "arduino", colors, dither,
+                                           lambda v: Image.new("RGB", (v.width, v.height), (gray,) * 3))
+        return body[plane:]
+
+    assert accents(0x50) == accents(255)
 
 
 def test_too_small_image_is_rejected():

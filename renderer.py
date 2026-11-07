@@ -2,10 +2,11 @@
 Composizione dell'immagine del percorso: base cartografica, tracciati, marker e
 riquadro informativo in alto a destra.
 
-Lo stesso codice di disegno serve il JPEG a colori pieni e i piani e-paper:
-nel secondo caso la base si quantizza prima, e tutto il resto si disegna dopo
-sugli indici di palette, quindi testo, icone e tracciati restano in colore
-pieno senza errore di dither attorno.
+Lo stesso codice di disegno serve il JPEG a colori pieni e le immagini nella
+palette del pannello, piani e-paper o JPEG di anteprima: in queste la base si
+quantizza prima, e tutto il resto si disegna dopo sugli indici di palette,
+quindi testo, icone e tracciati restano in colore pieno senza errore di dither
+attorno.
 """
 
 from __future__ import annotations
@@ -52,6 +53,9 @@ DELAY_ALERT_S = 300
 # abbondanti della resa a scale=1, che il tracciato non deve coprire.
 GOOGLE_LOGO = (72, 28)
 GOOGLE_ATTRIBUTION = (210, 16)
+
+# Qualità del JPEG a colori pieni, il formato di default di /route.
+JPEG_QUALITY = 80
 
 FONT_MAIN = "FreeSansBold18pt7b"
 FONT_BODY = "FreeSans12pt7b"
@@ -157,10 +161,10 @@ def _palette_bytes(colors: dict[str, object]) -> list[int]:
     return list(colors["_palette"])
 
 
-def _color_table(fmt: str, color_mode: str) -> tuple[str, dict[str, object]]:
-    """Modo dell'immagine e valore di ogni colore logico: tupla RGB per il JPEG,
-    indice di palette per i piani. Senza rosso nella palette il rosso è nero."""
-    if fmt == "jpg":
+def _color_table(color_mode: str) -> tuple[str, dict[str, object]]:
+    """Modo dell'immagine e valore di ogni colore logico: tupla RGB a colori
+    pieni, indice di palette altrimenti. Senza rosso nella palette il rosso è nero."""
+    if color_mode == "rgb":
         return "RGB", {"white": (255, 255, 255), "black": (0, 0, 0), "red": (255, 0, 0)}
     palette = PALETTES[color_mode]
     flat = [c for rgb in palette for c in rgb]
@@ -227,9 +231,10 @@ def render_route_image(
     fetch_map: Callable[[Viewport], Image.Image],
 ) -> bytes:
     """
-    Immagine finale: JPEG a colori pieni se fmt è "jpg", altrimenti i piani
-    e-paper header-less di arduino_format. ValueError se il riquadro non entra
-    nella misura richiesta.
+    Immagine finale: JPEG se fmt è "jpg", a colori pieni con color_mode "rgb" e
+    nella palette del pannello altrimenti; con "arduino" i piani e-paper
+    header-less di arduino_format. ValueError se il riquadro non entra nella
+    misura richiesta.
     """
     scale = scale_for(width, height)
     rows = card_rows(result)
@@ -249,11 +254,15 @@ def render_route_image(
                             margin=margin, padding=LINE_PADDING * scale, scale=scale)
     base = fetch_map(viewport)
 
-    mode, colors = _color_table(fmt, color_mode)
+    mode, colors = _color_table(color_mode)
     if mode == "RGB":
         image = base.convert("RGB")
     else:
-        image = indices_to_p_image(quantize(base, color_mode, dither), color_mode)
+        # La base è in grigi per costruzione (STYLE_GRAY), quindi si quantizza su
+        # bianco e nero, indici 0 e 1 in ogni palette: rosso e giallo restano a
+        # tracciati, testo e icone. Verso bwr il Floyd-Steinberg di Pillow sceglie
+        # a volte il rosso anche per un grigio puro, soprattutto vicino al bordo destro.
+        image = indices_to_p_image(quantize(base, "bw", dither), color_mode)
 
     draw = ImageDraw.Draw(image)
     if result.eco is not None:
@@ -284,6 +293,7 @@ def render_route_image(
 
     if fmt == "jpg":
         buffer = io.BytesIO()
-        image.save(buffer, format="JPEG", quality=92, subsampling=0, optimize=False, progressive=True)
+        # Pillow non scrive in JPEG un'immagine a palette.
+        image.convert("RGB").save(buffer, format="JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=False, progressive=True)
         return buffer.getvalue()
     return encode_arduino(np.array(image, dtype=np.uint8), color_mode=color_mode)

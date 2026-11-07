@@ -1,6 +1,6 @@
 ---
 name: Google Routes e Static Maps, fatti verificati
-description: cosa è confermato dalla documentazione ufficiale (eco-routing, Italia, SKU, limiti Static API, termini SEE, render free tier) e cosa resta da verificare con una chiamata reale
+description: cosa è confermato dalla documentazione ufficiale (eco-routing, Italia, SKU, limiti Static API, termini SEE, render free tier) e dalle chiamate reali (staticDuration presente, latenze, logo leggibile a 1 bit)
 metadata:
   type: reference
 ---
@@ -16,6 +16,6 @@ Fatti confermati sulla documentazione ufficiale Google Maps Platform e render.co
 - Termini: attribuzione e logo non modificabili nè coperti; risultati della Routes API solo su mappa Google. Con fatturazione SEE è vietato mostrare `description` e i passi del percorso con una mappa.
 - render.com free: 750 ore-istanza al mese condivise fra tutti i servizi free del workspace, spegnimento dopo 15 min senza traffico, cold start dichiarato di circa un minuto.
 
-Ancora da verificare con una chiamata reale: il percorso `routes.staticDuration` del field mask (se manca, `RouteInfo.delay_s` è None e la riga del ritardo non compare), la latenza di `TRAFFIC_AWARE_OPTIMAL` (timeout del client a 15 s, misura nel log `routefinder.routes`), la leggibilità del logo Google dopo il dither a 1 bit.
+Verificato con chiamate reali (Ancona 43.6158,13.5189 -> 43.5,13.3, server locale con `uvicorn --env-file .env`): `routes.staticDuration` arriva (riga del ritardo presente, "+0 min" a traffico scorrevole); `TRAFFIC_AWARE_OPTIMAL` risponde in ~220 ms, ben sotto il timeout di 15 s; Static API 140-300 ms a 610 px, ~650 ms a 1280 (`scale=2`); logo "Google" e "Map data ©2026 Google" leggibili anche dopo il dither a 1 bit. Su quella tratta l'API ha restituito una sola rotta (log "eco assente").
 
 **How to apply:** prima di aggiungere una funzione della Routes API controllare in quale SKU porta la richiesta. Vedi [[rendering_decisions]].

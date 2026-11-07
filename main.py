@@ -18,7 +18,7 @@ import auth
 from cache import TTLCache
 from renderer import render_route_image
 from routes_api import RoutesError, compute_routes
-from static_map import StaticMapError, fetch_base_map
+from static_map import MAX_SIDE, StaticMapError, fetch_base_map
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -31,6 +31,10 @@ API_KEY_ENV = "GOOGLE_MAPS_API_KEY"
 ROUTE_CACHE_TTL_S = 300
 
 MIN_SIDE = 64
+
+# Palette del pannello quando la richiesta non la indica: default di
+# format=arduino e palette aggiunta all'URL di un JPEG con dither senza colors.
+DEFAULT_COLORS = "bwr"
 
 app = FastAPI(
     title="Routefinder",
@@ -133,19 +137,29 @@ def route(
     origin: Optional[str] = Query(None, description="Partenza, lat,lng in gradi decimali."),
     destination: Optional[str] = Query(None, description="Arrivo, lat,lng in gradi decimali."),
     fuel: Literal["gasoline", "diesel", "hybrid", "electric"] = Query("gasoline"),
-    width: int = Query(610, description="Larghezza in px, al massimo 1280."),
-    height: int = Query(290, description="Altezza in px, al massimo 1280."),
+    width: int = Query(MAX_SIDE, description=f"Larghezza in px, al massimo {MAX_SIDE}; senza, la massima."),
+    height: int = Query(MAX_SIDE, description=f"Altezza in px, al massimo {MAX_SIDE}; senza, la massima."),
     format: Literal["jpg", "arduino"] = Query("jpg"),
-    colors: Optional[Literal["bw", "bwr", "bwry"]] = Query(None, description="Solo con format=arduino."),
-    dither: Optional[Literal["no", "floyd", "atkinson", "bayer"]] = Query(None, description="Solo con format=arduino."),
+    colors: Optional[Literal["bw", "bwr", "bwry"]] = Query(
+        None, description=f"Palette del pannello. Con format=arduino default {DEFAULT_COLORS}; con format=jpg "
+                          "senza colors il JPEG è a colori pieni, e un dither senza colors rimanda all'URL "
+                          f"con colors={DEFAULT_COLORS}."),
+    dither: Optional[Literal["no", "floyd", "atkinson", "bayer"]] = Query(
+        None, description="Dither verso la palette. Con format=arduino default floyd, con ogni colors; "
+                          "con format=jpg default nessuno (a soglia se c'è colors)."),
 ):
     """
     Percorso più veloce col traffico, con l'alternativa a minor consumo per il
     carburante se diversa, disegnato su mappa Google.
 
-    format=jpg (default) è a colori pieni e ignora colors e dither. format=arduino
-    restituisce i piani 1bpp header-less nel formato di /cinema/arduino della
-    webapp: Content-Length = piani * ceil(width/8) * height, nessuna compressione.
+    format=jpg (default) è a colori pieni; con colors è un'anteprima nella
+    palette del pannello, quantizzata come format=arduino, a soglia se manca
+    dither. Un dither senza colors rimanda con 307 allo stesso URL con
+    colors=DEFAULT_COLORS, così la palette scelta si vede nella barra degli
+    indirizzi.
+    format=arduino restituisce i piani 1bpp header-less nel formato di
+    /cinema/arduino della webapp: Content-Length = piani * ceil(width/8) * height,
+    nessuna compressione; default colors=DEFAULT_COLORS e dither=floyd.
     """
     if not auth.is_authorized(request):
         return _unauthorized(request)
@@ -153,16 +167,22 @@ def route(
         raise HTTPException(status_code=400, detail="origin e destination sono obbligatori")
     origin_point = parse_point(origin, "origin")
     destination_point = parse_point(destination, "destination")
-    if not (MIN_SIDE <= width <= 1280 and MIN_SIDE <= height <= 1280):
-        raise HTTPException(status_code=400, detail=f"misura fra {MIN_SIDE} e 1280 px per lato")
+    if not (MIN_SIDE <= width <= MAX_SIDE and MIN_SIDE <= height <= MAX_SIDE):
+        raise HTTPException(status_code=400, detail=f"misura fra {MIN_SIDE} e {MAX_SIDE} px per lato")
 
     headers = {"Cache-Control": "no-store"}
-    if format == "jpg":
-        if colors is not None or dither is not None:
-            headers["X-Routefinder-Warning"] = "colors e dither ignorati con format=jpg"
+    if format == "arduino":
+        color_mode, dither_mode = colors or DEFAULT_COLORS, dither or "floyd"
+    elif colors is None and dither is None:
         color_mode, dither_mode = "rgb", "no"
+    elif colors is None:
+        # Il dither ha bisogno di una palette: invece di sceglierla in silenzio si
+        # corregge l'URL, prima di ogni chiamata a pagamento. La query originale si
+        # tiene così com'è, senza ricodificare le virgole di origin e destination.
+        return RedirectResponse(url=f"{request.url.path}?{request.url.query}&colors={DEFAULT_COLORS}",
+                                status_code=307)
     else:
-        color_mode, dither_mode = colors or "bwr", dither or "floyd"
+        color_mode, dither_mode = colors, dither or "no"
 
     api_key = _api_key()
     try:
@@ -177,7 +197,7 @@ def route(
     try:
         body = _image_cache.get_or_compute(image_key, lambda: render_route_image(
             result, width, height, format, color_mode, dither_mode,
-            lambda viewport: fetch_base_map(viewport, api_key)))
+            lambda viewport: fetch_base_map(viewport, api_key, gray=color_mode != "rgb")))
     except StaticMapError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     except ValueError as exc:

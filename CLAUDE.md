@@ -14,7 +14,7 @@ Il firmware che lo consuma sta nella cartella padre: `Routefinder.h` (impostazio
 | `routes_api.py` | `computeRoutes` della Google Routes API, field mask minimo, parsing separato dalla chiamata |
 | `polyline.py` | decodifica dell'encoded polyline Google, precisione 5 |
 | `map_fit.py` | proiezione Web Mercator e scelta di zoom e centro con il tracciato fuori dalle zone vietate |
-| `static_map.py` | base cartografica in grigi dalla Maps Static API, stile pensato per il tre colori |
+| `static_map.py` | base cartografica dalla Maps Static API: `STYLE_CONTENT` (solo nomi delle località, niente simboli) sempre, `STYLE_GRAY` (grigi per il tre colori) solo nella palette del pannello, cioè con `format=arduino` o con `format=jpg` e `colors` |
 | `renderer.py` | composizione: base, tracciati, simboli di partenza e arrivo, riquadro informativo |
 | `gfx_font.py` | font Adafruit GFX letti dai `.h` e disegnati a 1 bit, parser portato da `tools/layout_preview.py` del firmware |
 | `material_icons.py` | icone Material Symbols Rounded a 1 bit |
@@ -22,7 +22,7 @@ Il firmware che lo consuma sta nella cartella padre: `Routefinder.h` (impostazio
 | `assets/` | `MaterialSymbolsRounded.ttf` e codepoints (identici a `A:\epd\icons\weather\source`), font GFX del pannello, licenze |
 | `tests/` | pytest: logica pura in `test_core.py`, endpoint in `test_api.py` |
 
-Flusso di `/route`: autenticazione, validazione dei parametri, `computeRoutes` (cache 5 min per origine, destinazione e carburante), misura del riquadro, fit della mappa, download della base, quantizzazione (solo `format=arduino`), disegno di tracciati e riquadro **dopo** il dither, codifica.
+Flusso di `/route`: autenticazione, validazione dei parametri (un JPEG con `dither` senza `colors` si ferma qui con un 307), `computeRoutes` (cache 5 min per origine, destinazione e carburante), misura del riquadro, fit della mappa, download della base, quantizzazione su bianco e nero (con `format=arduino`, o con `format=jpg` e `colors`), disegno di tracciati e riquadro **dopo** il dither, codifica.
 
 
 ## Contratti da non rompere
@@ -31,7 +31,7 @@ Flusso di `/route`: autenticazione, validazione dei parametri, `computeRoutes` (
 - **Querystring che il firmware compone** (`Routefinder::buildUrl()`): `origin`, `destination` come `lat,lng` a sei decimali, `fuel`, `width`, `height`, `format=arduino`, `colors=bwr`, `dither=floyd`. Cambiare un nome o un default qui richiede di cambiare anche il firmware.
 - **Header del token**: `X-Routefinder-Token`, lo stesso nome nel firmware.
 - **`/health` resta aperto e senza chiamate a pagamento**: è il bersaglio del pre-warm del firmware e la liveness probe di render.
-- `format=jpg` è sempre a colori pieni senza dither: `colors` e `dither` si ignorano e l'header `X-Routefinder-Warning` lo segnala.
+- **Default di `colors` e `dither`**, per formato. `format=arduino`: `colors` vale `main.DEFAULT_COLORS` (`bwr`), `dither` vale `floyd` con qualunque `colors`. `format=jpg` (qualità `renderer.JPEG_QUALITY`): senza `colors` è a colori pieni, con la mappa nei colori di Google; con `colors` è l'anteprima del pannello, mappa in grigi quantizzata come `format=arduino`, e senza `dither` è a soglia (`no`). Un JPEG con `dither` senza `colors` non si serve: risponde 307 allo stesso URL con `&colors=bwr` in coda, così chi lo apre nel browser vede la palette applicata. La query originale si conserva così com'è, perchè ricodificata avrebbe le virgole di `origin` e `destination` in `%2C`. Il firmware passa sempre `colors` e `dither`, quindi questi default non lo toccano. Nessun parametro si ignora, quindi non c'è header di avviso. A decidere fra le due strade è `color_mode == "rgb"`, non il formato: lo usano sia lo stile della Static API sia `renderer._color_table()`.
 - Le copie `dithering.py`, `arduino_format.py`, `cache.py` vanno tenute allineate alla webapp: una modifica al formato va fatta in entrambi i repository e nel firmware.
 
 
@@ -42,13 +42,13 @@ Flusso di `/route`: autenticazione, validazione dei parametri, `computeRoutes` (
 - Con fatturazione nello Spazio Economico Europeo non si mostrano `description` nè i passi del percorso accanto alla mappa: il riquadro non li contiene e il field mask non li chiede. Non aggiungere la strada principale.
 - La rotta eco richiede `routingPreference=TRAFFIC_AWARE_OPTIMAL`, che porta ogni chiamata nello SKU Compute Routes Pro (5 000 gratuite al mese). Non chiedere `TOLLS` nè `TRAFFIC_ON_POLYLINE` in `extraComputations`: portano allo SKU Enterprise.
 - Se la rotta eco coincide con la più veloce l'API restituisce una sola rotta con entrambe le etichette: in quel caso la riga eco non compare. L'eco-routing è ancora marcato Preview, quindi la sua assenza non è un errore.
-- La Static API serve al massimo 640 px per lato a `scale=1` e `scale=2`; oltre 640 si chiede metà misura con `scale=2`, oltre 1280 è un 400.
+- La Static API serve al massimo 640 px per lato a `scale=1` e `scale=2`; oltre 640 si chiede metà misura con `scale=2`, oltre 1280 è un 400. Il limite per lato vive solo in `static_map.MAX_SIDE` (`MAX_SIZE * MAX_SCALE`), che `main.py` importa come default e come controllo di `width` e `height`: non riscriverlo a mano altrove nel codice.
 - Non conservare a lungo i contenuti della mappa: la cache è di 5 minuti e il firmware smette di mostrare il percorso dopo 3 cadenze (sorgente Automatica) o un'ora (sorgente Percorso).
 
 
 ## Stile dell'immagine
 
-Coerente col pannello e in stile Material: card bianca ad angoli arrotondati con bordo nero, righe icona più testo, tempo stimato in `FreeSansBold18pt7b`, righe in `FreeSans12pt7b`, ora del calcolo in `FreeSans9pt7b`. Icone Material Symbols Rounded vuote, soglia a 128 come `tools/weather_icons.py` del firmware. Tracciato veloce rosso pieno con bordo bianco, eco nero tratteggiato, ritardo in rosso oltre 5 minuti. Il testo del riquadro è **ASCII a 7 bit**, come i font del firmware: niente lettere accentate nelle stringhe disegnate. Testo, icone e tracciati si disegnano sugli indici di palette dopo il dither, quindi non hanno errore di diffusione attorno.
+Coerente col pannello e in stile Material: card bianca ad angoli arrotondati con bordo nero, righe icona più testo, tempo stimato in `FreeSansBold18pt7b`, righe in `FreeSans12pt7b`, ora del calcolo in `FreeSans9pt7b`. Icone Material Symbols Rounded vuote, soglia a 128 come `tools/weather_icons.py` del firmware. Tracciato veloce rosso pieno con bordo bianco, eco nero tratteggiato, ritardo in rosso oltre 5 minuti. Il testo del riquadro è **ASCII a 7 bit**, come i font del firmware: niente lettere accentate nelle stringhe disegnate. Testo, icone e tracciati si disegnano sugli indici di palette dopo il dither, quindi non hanno errore di diffusione attorno. La base in grigi si quantizza sempre sulla palette `bw`, i cui indici 0 e 1 valgono in ogni palette: verso `bwr` il Floyd-Steinberg di Pillow sceglie a volte il rosso anche per un grigio puro, soprattutto vicino al bordo destro. Così rosso e giallo restano solo a tracciati, testo e icone.
 
 Le misure stanno in testa a `renderer.py` a `scale=1` e raddoppiano con `scale=2`. Dopo una modifica di layout si controlla l'immagine a occhio, a 610x290 e 610x325, sia `jpg` sia `arduino` ridecodificato.
 
