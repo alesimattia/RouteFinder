@@ -242,14 +242,14 @@ def test_example_cells_match_route(client):
     """Ogni cella del pannello è identica, pixel per pixel, ai piani che /route
     restituisce con gli stessi parametri e la misura della cella."""
     headers = {"X-Routefinder-Token": TOKEN}
-    canvas = np.array(Image.open(io.BytesIO(client.get(EXAMPLE, headers=headers).content)))
+    canvas = np.array(Image.open(io.BytesIO(client.get(EXAMPLE, headers=headers).content)).convert("RGB"))
     origin = main.parse_point(examples.ORIGIN, "origin")
     destination = main.parse_point(examples.DESTINATION, "destination")
     result = main._route_cache.get_or_compute((origin, destination, "gasoline"), None)
     grid = examples.grid_for(result, *examples.DEFAULT_CANVAS)
     w, h = grid.cell_w, grid.cell_h
     for index, cell in enumerate(examples.CELLS):
-        if cell is None or cell[0] == "rgb":
+        if not isinstance(cell, tuple) or cell[0] == "rgb":
             continue
         colors, dither = cell
         body = client.get(f"/route?origin={examples.ORIGIN}&destination={examples.DESTINATION}"

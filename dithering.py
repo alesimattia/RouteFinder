@@ -115,52 +115,38 @@ def _quantize_atkinson(img_rgb, palette_rgb):
     """
     Dithering Atkinson: distribuisce 6/8 dell'errore a 6 vicini.
 
-    Implementazione in pure-Python su nested list per evitare l'overhead
-    numpy per-pixel (diventerebbe molto piu' lento su immagini grandi).
+    L'errore di un pixel va a (y, x+1), (y, x+2), (y+1, x-1), (y+1, x),
+    (y+1, x+1) e (y+2, x), quindi i pixel con lo stesso t = x + 2y non
+    dipendono l'uno dall'altro: si elaborano insieme in numpy, un'antidiagonale
+    alla volta, w + 2h passi invece di un ciclo Python su ogni pixel. Ogni pixel
+    somma gli errori ricevuti nell'ordine della scansione riga per riga, quindi
+    il risultato è identico bit per bit a quello del ciclo sui pixel, con una
+    frazione del tempo e della RAM (niente liste annidate di float Python).
     """
-    arr_np = np.array(img_rgb, dtype=np.float32)
-    h, w, _ = arr_np.shape
-    arr = arr_np.tolist()
-    palette = [(float(r), float(g), float(b)) for r, g, b in palette_rgb]
-    result = [[0] * w for _ in range(h)]
-
-    for y in range(h):
-        row = arr[y]
-        row_n1 = arr[y + 1] if y + 1 < h else None
-        row_n2 = arr[y + 2] if y + 2 < h else None
-        result_row = result[y]
-        for x in range(w):
-            p = row[x]
-            or_ = p[0]; og = p[1]; ob = p[2]
-            best_i = 0
-            best_d = 1e18
-            for i, (pr, pg, pb) in enumerate(palette):
-                dr = or_ - pr
-                dg = og - pg
-                db = ob - pb
-                d = dr * dr + dg * dg + db * db
-                if d < best_d:
-                    best_d = d
-                    best_i = i
-            pr, pg, pb = palette[best_i]
-            result_row[x] = best_i
-            er = (or_ - pr) * 0.125
-            eg = (og - pg) * 0.125
-            eb = (ob - pb) * 0.125
-            if x + 1 < w:
-                q = row[x + 1]; q[0] += er; q[1] += eg; q[2] += eb
-            if x + 2 < w:
-                q = row[x + 2]; q[0] += er; q[1] += eg; q[2] += eb
-            if row_n1 is not None:
-                if x - 1 >= 0:
-                    q = row_n1[x - 1]; q[0] += er; q[1] += eg; q[2] += eb
-                q = row_n1[x]; q[0] += er; q[1] += eg; q[2] += eb
-                if x + 1 < w:
-                    q = row_n1[x + 1]; q[0] += er; q[1] += eg; q[2] += eb
-            if row_n2 is not None:
-                q = row_n2[x]; q[0] += er; q[1] += eg; q[2] += eb
-
-    return np.array(result, dtype=np.uint8)
+    base = np.asarray(img_rgb, dtype=np.float32)
+    h, w, _ = base.shape
+    palette = np.array(palette_rgb, dtype=np.float64)
+    # Errore già diviso per 8 di ogni pixel, con due righe e due colonne vuote
+    # prima e una colonna dopo: i vicini fuori dall'immagine contribuiscono 0.
+    err = np.zeros((h + 2, w + 3, 3), dtype=np.float64)
+    result = np.empty((h, w), dtype=np.uint8)
+    for t in range(w + 2 * (h - 1)):
+        ys = np.arange(max(0, (t - w + 2) // 2), min(h - 1, t // 2) + 1)
+        xs = t - 2 * ys
+        ey, ex = ys + 2, xs + 2
+        p = base[ys, xs].astype(np.float64)
+        p = p + err[ey - 2, ex]
+        p = p + err[ey - 1, ex - 1]
+        p = p + err[ey - 1, ex]
+        p = p + err[ey - 1, ex + 1]
+        p = p + err[ey, ex - 2]
+        p = p + err[ey, ex - 1]
+        diff = p[:, None, :] - palette[None, :, :]
+        square = diff * diff
+        idx = np.argmin(square[..., 0] + square[..., 1] + square[..., 2], axis=1)
+        result[ys, xs] = idx
+        err[ey, ex] = (p - palette[idx]) * 0.125
+    return result
 
 
 _DISPATCH = {

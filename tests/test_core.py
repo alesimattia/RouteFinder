@@ -10,6 +10,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+import dithering
+import examples
 import gfx_font
 import material_icons
 import polyline
@@ -234,3 +236,49 @@ def test_too_small_image_is_rejected():
     result = routes_api.parse_response(_route_payload(), NOW)
     with pytest.raises(ValueError):
         renderer.render_route_image(result, 120, 80, "jpg", "rgb", "no", _fake_map)
+
+
+def _atkinson_reference(img_rgb, palette_rgb):
+    """Il ciclo Python pixel per pixel da cui deriva dithering._quantize_atkinson:
+    la versione per antidiagonali deve restituire gli stessi indici."""
+    arr = np.array(img_rgb, dtype=np.float32).tolist()
+    h, w = len(arr), len(arr[0])
+    palette = [tuple(float(c) for c in rgb) for rgb in palette_rgb]
+    result = np.zeros((h, w), dtype=np.uint8)
+    for y in range(h):
+        for x in range(w):
+            p = arr[y][x]
+            best_i, best_d = 0, 1e18
+            for i, (pr, pg, pb) in enumerate(palette):
+                d = (p[0] - pr) * (p[0] - pr) + (p[1] - pg) * (p[1] - pg) + (p[2] - pb) * (p[2] - pb)
+                if d < best_d:
+                    best_i, best_d = i, d
+            result[y, x] = best_i
+            e = [(p[c] - palette[best_i][c]) * 0.125 for c in range(3)]
+            for dy, dx in ((0, 1), (0, 2), (1, -1), (1, 0), (1, 1), (2, 0)):
+                if 0 <= y + dy < h and 0 <= x + dx < w:
+                    q = arr[y + dy][x + dx]
+                    for c in range(3):
+                        q[c] += e[c]
+    return result
+
+
+@pytest.mark.parametrize("size", [(1, 1), (9, 1), (1, 9), (2, 2), (37, 23), (64, 41)])
+def test_atkinson_matches_pixel_loop(size):
+    rng = np.random.default_rng(size[0] * 100 + size[1])
+    image = Image.fromarray(rng.integers(0, 256, (size[1], size[0], 3), dtype=np.uint8))
+    for palette in PALETTES.values():
+        assert (dithering._quantize_atkinson(image, palette) == _atkinson_reference(image, palette)).all()
+
+
+def test_example_measures_ram_once_per_size(monkeypatch):
+    """La RAM di una cella dipende dalla misura, non dalla mappa: alla seconda
+    griglia della stessa misura tracemalloc non riparte."""
+    examples._peak_cache.clear()
+    starts = []
+    real_start = examples.tracemalloc.start
+    monkeypatch.setattr(examples.tracemalloc, "start", lambda *a: (starts.append(1), real_start(*a)))
+    result = routes_api.parse_response(_route_payload(), NOW)
+    for _ in range(2):
+        examples.render_examples(result, 1920, 1080, "/route?x", None, _fake_map)
+    assert len(starts) == len([c for c in examples.CELLS if isinstance(c, tuple)])

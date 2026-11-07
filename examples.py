@@ -21,13 +21,14 @@ import threading
 import time
 import tracemalloc
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 import gfx_font
 import renderer
-from dithering import PLANE_ORDER
+from dithering import PALETTES, PLANE_ORDER
 from map_fit import Viewport
 from routes_api import RouteResult
 from static_map import MAX_SCALE, MAX_SIDE
@@ -39,18 +40,21 @@ ORIGIN = "43.5689926,13.5132431"
 DESTINATION = "43.5572068,13.5074924"
 
 # Tela senza viewport (curl, script) e tela massima: oltre, le celle
-# crescerebbero e con loro la RAM, ~180 byte per pixel con Atkinson (~55 MB
-# per una cella da 630x466, quella della tela massima).
+# crescerebbero e con loro la RAM, ~110 byte per pixel con Bayer, il dither che
+# ne usa di più (~32 MB per una cella da 630x466, quella della tela massima).
 DEFAULT_CANVAS = (1920, 1080)
 MAX_CANVAS = (2560, 1600)
 
-# Celle in ordine di lettura come (colors, dither); None è il riepilogo. Su
-# quattro colonne viene una riga per palette e una colonna per dither. Atkinson
-# è in Python puro e costa ~20 volte gli altri, quindi compare una volta sola.
-CELLS: tuple[Optional[tuple[str, str]], ...] = (
-    ("bw", "no"), ("bw", "floyd"), ("bw", "bayer"), ("rgb", "no"),
-    ("bwr", "no"), ("bwr", "floyd"), ("bwr", "bayer"), ("bwry", "atkinson"),
-    ("bwry", "no"), ("bwry", "floyd"), ("bwry", "bayer"), None,
+# Celle in ordine di lettura: (colors, dither), SUMMARY per il riepilogo, None
+# per un posto vuoto. Su quattro colonne la prima tiene il riepilogo in alto e
+# Atkinson nella riga di bwry, la sua palette; le altre sono una colonna per
+# dither: senza dither (rgb nella riga di bw), floyd, bayer. Atkinson è il
+# dither più lento, quindi compare una volta sola.
+SUMMARY = "riepilogo"
+CELLS: tuple[Union[tuple[str, str], str, None], ...] = (
+    SUMMARY, ("rgb", "no"), ("bw", "floyd"), ("bw", "bayer"),
+    None, ("bwr", "no"), ("bwr", "floyd"), ("bwr", "bayer"),
+    ("bwry", "atkinson"), ("bwry", "no"), ("bwry", "floyd"), ("bwry", "bayer"),
 )
 
 # Proporzioni della fascia del 9.7" nel firmware: fra due disposizioni vince
@@ -61,7 +65,13 @@ PANEL_ASPECT = 610 / 290
 GUTTER = 8
 PADDING = 6
 BACKGROUND = (220, 220, 220)
-TEXT = (0, 0, 0)
+
+# La PNG è a palette: prima bianco, nero, rosso e giallo con gli indici di
+# dithering.PALETTES, così le celle del pannello si incollano così come sono,
+# poi lo sfondo; le voci che restano vanno alle celle a colori pieni.
+FIXED_COLORS = PALETTES["bwry"] + [BACKGROUND]
+TEXT = 1
+BACKGROUND_INDEX = len(FIXED_COLORS) - 1
 FONT_TITLE = renderer.FONT_BODY
 FONT_TEXT = renderer.FONT_SMALL
 STATS_SEPARATOR = "  "
@@ -88,6 +98,16 @@ location.replace(location.pathname + location.search + (location.search ? "&" : 
 
 # tracemalloc è globale al processo: due misure insieme si sporcherebbero a vicenda.
 _TRACE_LOCK = threading.Lock()
+
+# Picco di RAM per (colors, dither, larghezza, altezza): dipende dal numero di
+# pixel e dall'algoritmo, non dal contenuto della mappa, quindi si misura una
+# volta per processo e le richieste successive alla stessa misura lo riusano.
+_peak_cache: dict[tuple[str, str, int, int], int] = {}
+
+# Dither che tracemalloc rallenta troppo perchè il tempo preso nella stessa
+# composizione sia credibile: Atkinson ~3 volte, per le tante piccole
+# allocazioni di ogni passo. Alla prima misura si compongono due volte.
+_TRACE_SLOWED = frozenset({"atkinson"})
 
 
 @dataclass(frozen=True)
@@ -191,26 +211,39 @@ def grid_for(result: RouteResult, canvas_w: int, canvas_h: int) -> Grid:
     return best
 
 
-def _peak_allocations(cells: list[tuple[str, str]],
-                      compose: Callable[[tuple[str, str]], Image.Image]) -> dict[tuple[str, str], int]:
+def _timed(compose: Callable[[tuple[str, str]], Image.Image],
+           cell: tuple[str, str]) -> tuple[Image.Image, float]:
+    """Immagine della cella e secondi spesi a comporla."""
+    started = time.perf_counter()
+    image = compose(cell)
+    return image, time.perf_counter() - started
+
+
+def _compose_measured(cells: list[tuple[str, str]], compose: Callable[[tuple[str, str]], Image.Image],
+                      size: tuple[int, int]) -> tuple[dict, dict, dict]:
     """
-    Picco di memoria allocata durante la composizione di ogni cella, misurato
-    con tracemalloc: vede gli oggetti Python e gli array numpy, non i buffer
-    delle immagini Pillow. Passata separata da quella dei tempi, perchè
-    tracemalloc rallenta Atkinson di circa 20 volte.
+    Immagine, tempo e picco di RAM di ogni cella, componendola una volta sola
+    quando si può. La RAM si misura con tracemalloc, che vede gli oggetti
+    Python e gli array numpy ma non i buffer delle immagini Pillow, solo se non
+    è già in _peak_cache; il tempo viene dalla stessa composizione, tranne che
+    per i dither di _TRACE_SLOWED, che si ricompongono senza tracemalloc.
     """
-    peaks = {}
-    with _TRACE_LOCK:
-        tracemalloc.start()
-        try:
-            for cell in cells:
-                tracemalloc.reset_peak()
-                before = tracemalloc.get_traced_memory()[0]
-                compose(cell)
-                peaks[cell] = tracemalloc.get_traced_memory()[1] - before
-        finally:
-            tracemalloc.stop()
-    return peaks
+    images, elapsed, peaks = {}, {}, {}
+    for cell in cells:
+        key = (*cell, *size)
+        traced = key not in _peak_cache
+        if traced:
+            with _TRACE_LOCK:
+                tracemalloc.start()
+                try:
+                    images[cell], elapsed[cell] = _timed(compose, cell)
+                    _peak_cache[key] = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+        if not traced or cell[1] in _TRACE_SLOWED:
+            images[cell], elapsed[cell] = _timed(compose, cell)
+        peaks[cell] = _peak_cache[key]
+    return images, elapsed, peaks
 
 
 def _full_size_jpeg(image: Image.Image, scale: int) -> float:
@@ -248,21 +281,16 @@ def render_examples(
     base = fetch_map(layout.viewport)
     static_s = time.perf_counter() - started
 
-    cells = [cell for cell in CELLS if cell is not None]
+    cells = [cell for cell in CELLS if isinstance(cell, tuple)]
 
     def compose(cell: tuple[str, str]) -> Image.Image:
         colors, dither = cell
         return renderer.compose_route_image(result, layout, base, colors, dither)
 
-    # La passata della RAM va per prima e scalda le cache di font e icone, che
-    # altrimenti finirebbero nel tempo della prima cella.
-    peaks = _peak_allocations(cells, compose)
-    images: dict[tuple[str, str], Image.Image] = {}
-    elapsed: dict[tuple[str, str], float] = {}
-    for cell in cells:
-        started = time.perf_counter()
-        images[cell] = compose(cell)
-        elapsed[cell] = time.perf_counter() - started
+    # La prima composizione carica le icone nelle loro cache: fuori dalla misura,
+    # altrimenti finirebbe nel tempo e nella RAM della prima cella.
+    compose(("rgb", "no"))
+    images, elapsed, peaks = _compose_measured(cells, compose, (grid.cell_w, grid.cell_h))
 
     def caption(cell: tuple[str, str]) -> list[str]:
         colors, dither = cell
@@ -284,22 +312,41 @@ def render_examples(
         f"{routes}, Static {_seconds(static_s)}",
         f"zoom {layout.viewport.zoom}, scale {layout.scale}, {len(cells)} celle in {_seconds(sum(elapsed.values()))}",
         f"{MAX_SIDE}: /route a {MAX_SIDE}x{MAX_SIDE}, ~ stima",
-        "RAM: Python e numpy (tracemalloc)",
     ]
     summary = [(FONT_TITLE, "Riepilogo")]
     summary += [(FONT_TEXT, line) for line in _query_lines(route_url, usable)]
     summary += [(FONT_TEXT, line) for text in info for line in _pack(text.split(" "), usable, " ")]
 
-    canvas = Image.new("RGB", grid.canvas, BACKGROUND)
+    # Le celle a colori pieni si riducono insieme alle voci di palette che
+    # restano dopo i colori fissi, e i loro indici si spostano dopo quelli.
+    full_color = [cell for cell in cells if images[cell].mode == "RGB"]
+    palette = [channel for rgb in FIXED_COLORS for channel in rgb]
+    pasted = dict(images)
+    if full_color:
+        strip = Image.new("RGB", (grid.cell_w * len(full_color), grid.cell_h))
+        for position, cell in enumerate(full_color):
+            strip.paste(images[cell], (position * grid.cell_w, 0))
+        reduced = strip.quantize(colors=256 - len(FIXED_COLORS))
+        palette += reduced.getpalette()[:3 * (256 - len(FIXED_COLORS))]
+        indices = np.asarray(reduced, dtype=np.uint8) + len(FIXED_COLORS)
+        for position, cell in enumerate(full_color):
+            part = np.ascontiguousarray(indices[:, position * grid.cell_w:(position + 1) * grid.cell_w])
+            pasted[cell] = Image.frombytes("P", (grid.cell_w, grid.cell_h), part.tobytes())
+
+    canvas = Image.new("P", grid.canvas, BACKGROUND_INDEX)
+    canvas.putpalette(palette)
     tile_h = grid.cell_h + grid.caption_h
     for index, cell in enumerate(CELLS):
-        tile = Image.new("RGB", (grid.cell_w, tile_h), (255, 255, 255))
         if cell is None:
+            continue
+        tile = Image.new("P", (grid.cell_w, tile_h), 0)
+        if cell == SUMMARY:
             lines = summary
             top = PADDING
         else:
-            tile.paste(images[cell].convert("RGB"), (0, 0))
-            ImageDraw.Draw(tile).line([(0, grid.cell_h), (grid.cell_w - 1, grid.cell_h)], fill=BACKGROUND)
+            # Incollare fra immagini "P" copia gli indici, senza convertire.
+            tile.paste(pasted[cell], (0, 0))
+            ImageDraw.Draw(tile).line([(0, grid.cell_h), (grid.cell_w - 1, grid.cell_h)], fill=BACKGROUND_INDEX)
             lines = [(FONT_TEXT, line) for line in caption(cell)]
             top = grid.cell_h + PADDING
         # Righe dall'alto, ciascuna alla sua interlinea; ciò che esce dalla cella
