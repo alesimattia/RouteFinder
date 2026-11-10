@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -75,7 +76,7 @@ def test_login_sets_cookie_and_redirects(client):
 
 def test_login_rejects_open_redirect(client):
     response = client.post("/auth", data={"token": TOKEN, "next": "//evil.example/x"}, follow_redirects=False)
-    assert response.headers["location"] == "/route"
+    assert response.headers["location"] == "/docs"
 
 
 def test_login_with_wrong_token(client):
@@ -257,3 +258,27 @@ def test_example_cells_match_route(client):
                           headers=headers).content
         x, y = grid.origin(index)
         assert (canvas[y:y + h, x:x + w] == _decode_planes(body, colors, w, h)).all(), cell
+
+
+def _access_record(client_addr, path, status, method="GET"):
+    """Riga del log di accesso con gli stessi args di uvicorn 0.54 (h11 e httptools)."""
+    return logging.LogRecord("uvicorn.access", logging.INFO, __file__, 0, '%s - "%s %s HTTP/%s" %d',
+                             (client_addr, method, path, "1.1", status), None)
+
+
+@pytest.mark.parametrize("client_addr, path, status, kept", [
+    ("10.231.26.208:44150", "/health", 200, False),   # health check interno di render
+    ("5.61.222.202:0", "/health", 200, True),         # pre-warm del firmware o browser, via proxy
+    ("127.0.0.1:51000", "/health", 200, True),        # curl in locale
+    ("10.231.26.208:44150", "/health", 503, True),    # health check fallito
+    ("10.231.26.208:44150", "/docs", 200, True),      # altro path dalla rete interna
+    ("10.231.26.208:44150", "/health?x=1", 200, True),
+    ("34.83.22.237:0", "/", 307, True),               # probe di deploy di render
+    ("", "/health", 200, True),                       # client sconosciuto
+])
+def test_render_health_check_filter(client_addr, path, status, kept):
+    assert main.RenderHealthCheckFilter().filter(_access_record(client_addr, path, status)) is kept
+
+
+def test_render_health_check_filter_is_installed():
+    assert any(isinstance(f, main.RenderHealthCheckFilter) for f in logging.getLogger("uvicorn.access").filters)

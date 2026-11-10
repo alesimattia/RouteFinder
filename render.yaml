@@ -7,9 +7,9 @@ services:
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
     healthCheckPath: /health
+    # La versione di Python la fissa .python-version, che render legge anche per
+    # un servizio non creato da Blueprint.
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
       # Segreti: si impostano dal pannello di render, mai nel repository.
       - key: GOOGLE_MAPS_API_KEY
         sync: false

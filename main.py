@@ -5,6 +5,7 @@ servito come JPEG a colori pieni o come piani 1bpp per il pannello e-paper.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import time
@@ -27,11 +28,37 @@ from static_map import MAX_SIDE, StaticMapError, fetch_base_map
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("routefinder")
 
+HEALTH_PATH = "/health"
+
+
+class RenderHealthCheckFilter(logging.Filter):
+    """Scarta dal log di accesso di uvicorn solo il health check interno di render:
+    GET di /health riuscito da un IP privato, mentre il traffico pubblico arriva dal
+    proxy con l'IP reale di X-Forwarded-For. Un health check fallito resta nel log."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) != 5:
+            return True
+        client_addr, _method, path, _http_version, status = args
+        if path != HEALTH_PATH or not isinstance(status, int) or not 200 <= status < 300:
+            return True
+        host = str(client_addr).rsplit(":", 1)[0].strip("[]")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return True
+        return not (address.is_private and not address.is_loopback)
+
+
+logging.getLogger("uvicorn.access").addFilter(RenderHealthCheckFilter())
+
 API_KEY_ENV = "GOOGLE_MAPS_API_KEY"
 
 # Il traffico cambia in minuti: oltre questo tempo un percorso in cache sarebbe
-# un'informazione vecchia. Basta a non pagare due volte un refresh del browser.
-ROUTE_CACHE_TTL_S = 300
+# un'informazione vecchia. Basta a non pagare due volte un refresh del browser, e
+# resta molto sotto il ciclo di ~5 minuti del firmware, che deve andare sempre in miss.
+ROUTE_CACHE_TTL_S = 60
 
 MIN_SIDE = 64
 
@@ -138,7 +165,7 @@ def root():
     return RedirectResponse(url="/docs")
 
 
-@app.get("/health")
+@app.get(HEALTH_PATH)
 def health():
     """Liveness probe di render.yaml e bersaglio del ping di pre-warm del
     firmware: aperto, perchè non tocca le API a pagamento."""

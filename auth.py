@@ -20,7 +20,9 @@ HEADER_NAME = "X-Routefinder-Token"
 COOKIE_NAME = "routefinder_token"
 QUERY_NAME = "token"
 COOKIE_MAX_AGE_S = 365 * 24 * 3600
-DEFAULT_NEXT = "/route"
+# /route senza parametri risponde 400 e /example chiama Google: dopo l'accesso
+# senza destinazione si torna alla documentazione, gratuita e con i parametri.
+DEFAULT_NEXT = "/docs"
 
 
 def expected_token() -> Optional[str]:

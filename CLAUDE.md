@@ -47,7 +47,8 @@ Flusso di `/example`: percorso fisso fra `examples.ORIGIN` e `examples.DESTINATI
 - La rotta eco richiede `routingPreference=TRAFFIC_AWARE_OPTIMAL`, che porta ogni chiamata nello SKU Compute Routes Pro (5 000 gratuite al mese). Non chiedere `TOLLS` nè `TRAFFIC_ON_POLYLINE` in `extraComputations`: portano allo SKU Enterprise.
 - Se la rotta eco coincide con la più veloce l'API restituisce una sola rotta con entrambe le etichette: in quel caso la riga eco non compare. L'eco-routing è ancora marcato Preview, quindi la sua assenza non è un errore.
 - La Static API serve al massimo 640 px per lato a `scale=1` e `scale=2`; oltre 640 si chiede metà misura con `scale=2`, oltre 1280 è un 400. Il limite per lato vive solo in `static_map.MAX_SIDE` (`MAX_SIZE * MAX_SCALE`), che `main.py` importa come default e come controllo di `width` e `height`: non riscriverlo a mano altrove nel codice.
-- Non conservare a lungo i contenuti della mappa: la cache è di 5 minuti e il firmware smette di mostrare il percorso dopo 3 cadenze (sorgente Automatica) o un'ora (sorgente Percorso).
+- Non conservare a lungo i contenuti della mappa: la cache è di 60 secondi e il firmware smette di mostrare il percorso dopo 3 cadenze (sorgente Automatica) o un'ora (sorgente Percorso).
+- **`ROUTE_CACHE_TTL_S` resta molto sotto il ciclo del firmware** (~301 s fra due richieste, che il tempo di connessione e i fetch precedenti spostano di qualche decina di secondi): ogni richiesta del firmware in fascia deve andare in miss e portare il traffico aggiornato. La cache serve solo al browser e a `/example`.
 
 
 ## Stile dell'immagine
@@ -60,7 +61,7 @@ Le misure stanno in testa a `renderer.py` a `scale=1` e raddoppiano con `scale=2
 ## Ambiente di sviluppo
 
 - **Il venv sta solo in `routefinder\.venv`** (gitignored), creato da `C:\Python314`. Non crearne altrove, nemmeno in `A:\tmp\sandbox`.
-- Dipendenze di produzione in `requirements.txt`, di test in `requirements-dev.txt`, sempre con vincoli `>=`: con Python 3.14 in locale i pin esatti cercano di compilare da sorgente. Il deploy usa Python 3.11.9 (`render.yaml`).
+- Dipendenze di produzione in `requirements.txt`, di test in `requirements-dev.txt`, sempre con vincoli `>=`: con Python 3.14 in locale i pin esatti cercano di compilare da sorgente. La versione di Python del deploy la fissa `.python-version` (3.14, la stessa del venv su cui girano i test), che render legge anche per un servizio creato dalla dashboard; `render.yaml` non la ripete, perchè `PYTHON_VERSION` avrebbe la precedenza.
 - `tzdata` è una dipendenza vera: su Windows `zoneinfo` non ha il database dei fusi, e l'ora del calcolo si stampa in `Europe/Rome` mentre render gira in UTC.
 - Test: `.venv\Scripts\python -m pytest -q -p no:cacheprovider`. Le API Google sono sostituite da fixture, quindi girano senza chiave. `tests/test_core.py` contiene anche l'encoder di polilinea usato per costruire le fixture.
 - Avvio locale con chiave vera: `GOOGLE_MAPS_API_KEY=... ROUTEFINDER_TOKEN=... .venv\Scripts\uvicorn main:app --reload`.
@@ -70,6 +71,10 @@ Le misure stanno in testa a `renderer.py` a `scale=1` e raddoppiano con `scale=2
 ## Deploy
 
 render.com free tier, regione Frankfurt, `uvicorn --workers 1`, come la webapp. `GOOGLE_MAPS_API_KEY` e `ROUTEFINDER_TOKEN` si impostano dal pannello di render (`sync: false` in `render.yaml`), mai nel repository. Senza `ROUTEFINDER_TOKEN` il servizio rifiuta ogni richiesta a `/route`. Le 750 ore-istanza gratuite al mese sono condivise con la webapp: il servizio resta sveglio solo nella fascia del mattino più 15 minuti.
+
+- Il servizio su render è stato creato dalla dashboard e non come Blueprint, quindi `render.yaml` documenta la configurazione ma render non la applica: Build Command e Start Command vanno tenuti allineati a mano nella dashboard.
+- Il log di accesso di uvicorn non contiene il health check interno di render (`/health` riuscito da IP privato, ogni pochi secondi): lo scarta `RenderHealthCheckFilter` in `main.py`. Le richieste pubbliche, compreso il pre-warm del firmware, arrivano dal proxy con l'IP reale di `X-Forwarded-For` e restano nel log, come un health check fallito.
+- Dopo `/auth` senza destinazione si torna a `/docs` (`auth.DEFAULT_NEXT`): `/route` senza parametri risponde 400 e `/example` chiama Google.
 
 
 ## Git

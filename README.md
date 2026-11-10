@@ -40,7 +40,7 @@ Render.com, free tier, come la webapp cinema (`render.yaml`). Variabili da impos
 - `GOOGLE_MAPS_API_KEY`: chiave di un progetto Google Cloud con fatturazione attiva e con **Routes API** e **Maps Static API** abilitate; conviene limitarla a quelle due API.
 - `ROUTEFINDER_TOKEN`: stringa casuale lunga, la stessa che va in `Env.h` del firmware.
 
-Costi: la preferenza `TRAFFIC_AWARE_OPTIMAL`, l'unica che ammette la rotta eco, porta ogni richiesta nello SKU Compute Routes Pro (5 000 chiamate gratuite al mese); la Static API sta in Essentials (10 000). Con un fetch ogni 10 minuti per due ore al giorno si resta abbondantemente nella soglia gratuita. Le risposte restano in cache 5 minuti, così un refresh del browser non paga una seconda chiamata.
+Costi: la preferenza `TRAFFIC_AWARE_OPTIMAL`, l'unica che ammette la rotta eco, porta ogni richiesta nello SKU Compute Routes Pro (5 000 chiamate gratuite al mese); la Static API sta in Essentials (10 000). Il firmware chiede un percorso a ogni ciclo di ~5 minuti nella fascia percorso, 24 richieste al giorno con la fascia 7-9: si resta abbondantemente nella soglia gratuita. Le risposte restano in cache 60 secondi, così un refresh del browser non paga una seconda chiamata, mentre ogni richiesta del firmware, distante un ciclo dalla precedente, va sempre in miss e porta il traffico aggiornato.
 
 ## Sviluppo
 
