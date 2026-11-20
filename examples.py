@@ -1,6 +1,6 @@
 """
-Griglia di /example: la stessa immagine del percorso in ogni palette e dither
-del pannello, più la versione a colori pieni, in un'unica PNG grande quanto la
+Griglia di /example: la stessa immagine del percorso in ogni palette e-paper e
+dither, più la versione a colori pieni, in un'unica PNG grande quanto la
 viewport del browser, con tempo, RAM e peso di ciascuna cella.
 
 Le celle sono piccole quanto basta a stare nella tela, così la RAM resta quella
@@ -57,17 +57,12 @@ CELLS: tuple[Union[tuple[str, str], str, None], ...] = (
     ("bwry", "atkinson"), ("bwry", "no"), ("bwry", "floyd"), ("bwry", "bayer"),
 )
 
-# Proporzioni della fascia del 9.7" nel firmware: fra due disposizioni vince
-# quella in cui un'immagine di queste proporzioni viene più grande, così le
-# celle somigliano a ciò che il pannello mostra.
-PANEL_ASPECT = 610 / 290
-
 GUTTER = 8
 PADDING = 6
 BACKGROUND = (220, 220, 220)
 
 # La PNG è a palette: prima bianco, nero, rosso e giallo con gli indici di
-# dithering.PALETTES, così le celle del pannello si incollano così come sono,
+# dithering.PALETTES, così le celle e-paper si incollano così come sono,
 # poi lo sfondo; le voci che restano vanno alle celle a colori pieni.
 FIXED_COLORS = PALETTES["bwry"] + [BACKGROUND]
 TEXT = 1
@@ -179,26 +174,28 @@ def _caption_height(width: int) -> int:
     return 2 * PADDING + len(lines) * gfx_font.load(FONT_TEXT).y_advance
 
 
-def _panel_area(width: int, height: int) -> float:
-    """Area del rettangolo più grande con le proporzioni PANEL_ASPECT che entra
-    in una cella width x height."""
-    return min(width, height * PANEL_ASPECT) * min(height, width / PANEL_ASPECT)
+def _fitted_area(width: int, height: int, aspect: float) -> float:
+    """Area del rettangolo più grande con rapporto larghezza/altezza `aspect`
+    che entra in una cella width x height."""
+    return min(width, height * aspect) * min(height, width / aspect)
 
 
 def grid_for(result: RouteResult, canvas_w: int, canvas_h: int) -> Grid:
     """
-    Fra tutti i numeri di colonne, la disposizione con le celle più vicine al
-    pannello (_panel_area più grande) in cui il riquadro informativo di /route
-    entra; ValueError se nessuna entra nella tela. Le celle restano entro il
-    lato massimo di /route, così ognuna si può riprodurre da lì.
+    Fra tutti i numeri di colonne, la disposizione con le celle più simili alla
+    tela, cioè quella in cui un rettangolo con le proporzioni della tela viene
+    più grande (_fitted_area), e in cui il riquadro informativo di /route entra;
+    ValueError se nessuna entra nella tela. Le celle restano entro il lato
+    massimo di /route, così ognuna si può riprodurre da lì.
     """
+    aspect = canvas_w / canvas_h
     best: Optional[Grid] = None
     for columns in range(1, len(CELLS) + 1):
         rows = math.ceil(len(CELLS) / columns)
         cell_w = (canvas_w - (columns + 1) * GUTTER) // columns
         caption_h = _caption_height(cell_w)
         cell_h = (canvas_h - (rows + 1) * GUTTER) // rows - caption_h
-        if best is not None and _panel_area(cell_w, cell_h) <= _panel_area(best.cell_w, best.cell_h):
+        if best is not None and _fitted_area(cell_w, cell_h, aspect) <= _fitted_area(best.cell_w, best.cell_h, aspect):
             continue
         try:
             route = renderer.route_layout(result, cell_w, cell_h)

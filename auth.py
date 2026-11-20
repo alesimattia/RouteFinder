@@ -1,5 +1,5 @@
 """
-Autenticazione a token condiviso. Il firmware manda l'header; il browser, che
+Autenticazione a token condiviso. Un client automatico manda l'header; il browser, che
 non può aggiungere header a una navigazione, incolla il token una volta nella
 pagina di accesso e da lì viaggia in un cookie.
 """
@@ -52,7 +52,7 @@ def is_authorized(request: Request) -> bool:
 
 def wants_html(request: Request) -> bool:
     """Vero per una navigazione da browser, che riceve la pagina di accesso
-    invece del 401 secco destinato a curl e al firmware."""
+    invece del 401 secco destinato a curl e ai client embedded."""
     return "text/html" in request.headers.get("accept", "")
 
 

@@ -1,8 +1,8 @@
 # routefinder
 
-Servizio FastAPI che calcola il percorso più veloce in auto, col traffico, fra due punti e lo restituisce come immagine: JPEG a colori pieni per il browser, oppure piani 1bpp pronti per il pannello e-paper di [ePaper-weather-dashboard](https://github.com/alesimattia/ePaper-weather-dashboard), di cui è un submodule. Il firmware lo mostra al posto della locandina cinema nella fascia del mattino.
+Servizio FastAPI che calcola il percorso più veloce in auto, col traffico, fra due punti e lo restituisce come immagine: JPEG a colori pieni per il browser, oppure piani 1bpp pronti per display e-paper a pochi colori (`bw`, `bwr`, `bwry`), che un client embedded legge direttamente nel buffer del display. Misura, palette e dither si scelgono dalla querystring.
 
-L'immagine è una mappa Google con il tracciato più veloce in rosso, l'alternativa a minor consumo per il carburante scelto in nero tratteggiato (solo se diversa), i simboli di partenza e arrivo e, in alto a destra, un riquadro con tempo stimato, ritardo dovuto al traffico, distanza, risparmio dell'alternativa eco e ora del calcolo. Testo e icone usano gli stessi font del pannello (FreeSans di Adafruit GFX e Material Symbols Rounded), e il tracciato non passa mai sotto il riquadro nè sopra logo e attribuzione Google.
+L'immagine è una mappa Google con il tracciato più veloce in rosso, l'alternativa a minor consumo per il carburante scelto in nero tratteggiato (solo se diversa), i simboli di partenza e arrivo e, in alto a destra, un riquadro con tempo stimato, ritardo dovuto al traffico, distanza, risparmio dell'alternativa eco e ora del calcolo. Testo e icone usano FreeSans di Adafruit GFX e Material Symbols Rounded, e il tracciato non passa mai sotto il riquadro nè sopra logo e attribuzione Google.
 
 ## Endpoint
 
@@ -11,7 +11,7 @@ L'immagine è una mappa Google con il tracciato più veloce in rosso, l'alternat
 | `GET /route` | immagine del percorso, richiede il token |
 | `GET /example` | griglia PNG con l'immagine in ogni palette e dither, richiede il token |
 | `GET /` | rimanda a `/docs`, la documentazione interattiva dei parametri |
-| `GET /health` | liveness probe e bersaglio del pre-warm del firmware, aperto |
+| `GET /health` | liveness probe e bersaglio di un eventuale pre-warm dei client, aperto |
 | `GET /auth`, `POST /auth` | pagina in cui incollare il token da browser |
 
 Parametri di `/route`:
@@ -25,22 +25,22 @@ Parametri di `/route`:
 | `colors` | `bwr` con `arduino`; nessuno con `jpg`, a colori pieni | `bw`, `bwr`, `bwry` |
 | `dither` | `floyd` con `arduino`, con ogni `colors`; nessuno con `jpg`, a soglia se c'è `colors` | `no`, `floyd`, `atkinson`, `bayer` |
 
-Con `format=arduino` il corpo sono i soli piani concatenati, MSB-first, bit a 1 = pixel non di quel colore, nello stesso formato di `/cinema/arduino` della webapp: `Content-Length = piani * ceil(width/8) * height`, per esempio 44660 byte a 610x290 `bwr`. Nessuna compressione su questo percorso, perchè il firmware confronta il `Content-Length`. Con `format=jpg` senza `colors` l'immagine è a colori pieni, con la mappa nei colori di Google. Con `colors` il JPEG è l'anteprima del pannello: la stessa mappa a colori convertita nella palette come per `arduino`, a soglia se manca `dither`. Un `dither` senza `colors` rimanda con un 307 allo stesso URL con `colors=bwr` aggiunto, così la palette applicata resta visibile nella barra degli indirizzi.
+Con `format=arduino` il corpo sono i soli piani concatenati, MSB-first, bit a 1 = pixel non di quel colore, nello stesso formato di `/cinema/arduino` della webapp: `Content-Length = piani * ceil(width/8) * height`, per esempio 30000 byte a 400x300 `bwr` (2 piani da 50 byte per 300 righe) e 22800 byte a 301x200 `bwry` (3 piani da 38 byte per 200 righe). Nessuna compressione su questo percorso e nessun clamp della misura: un client embedded confronta il `Content-Length` esatto, e una misura fuori da 64..1280 px per lato dà 400. Con `format=jpg` senza `colors` l'immagine è a colori pieni, con la mappa nei colori di Google. Con `colors` il JPEG è l'anteprima e-paper: la stessa mappa a colori convertita nella palette come per `arduino`, a soglia se manca `dither`. Un `dither` senza `colors` rimanda con un 307 allo stesso URL con `colors=bwr` aggiunto, così la palette applicata resta visibile nella barra degli indirizzi.
 
-`/example` disegna un percorso fisso, `ORIGIN` e `DESTINATION` in testa a `examples.py`, e accetta solo `fuel`, `width` e `height`. Restituisce un'unica PNG grande quanto la viewport del browser: aperto senza `width` e `height`, il browser riceve una pagina che rilegge lo stesso URL con le misure della finestra in pixel CSS; da curl o con `width` e `height` vale la misura indicata, di default 1920x1080, al massimo 2560x1600. Dentro ci sono la cella a colori pieni, `bw` con dither `floyd` e `bayer`, `bwr` e `bwry` con dither `no`, `floyd` e `bayer`, una cella `bwry` con `atkinson` e un riepilogo, in celle piccole quanto basta a stare nella finestra: il numero di colonne si sceglie perchè le celle somiglino al pannello, e sotto ~1440x790 il riquadro informativo non entra più e la risposta è un 400. Sotto ogni cella ci sono il suffisso dell'URL `/route` che la riproduce, tempo e RAM di generazione e il peso del corpo di `/route` a 1280x1280 (esatto per `arduino`, stimato per il JPEG). Ogni richiesta fa una chiamata alla Routes API (nessuna se il percorso è in cache) e una alla Static API: la base a colori, che ogni cella converte nella sua palette.
+`/example` disegna un percorso fisso, `ORIGIN` e `DESTINATION` in testa a `examples.py`, e accetta solo `fuel`, `width` e `height`. Restituisce un'unica PNG grande quanto la viewport del browser: aperto senza `width` e `height`, il browser riceve una pagina che rilegge lo stesso URL con le misure della finestra in pixel CSS; da curl o con `width` e `height` vale la misura indicata, di default 1920x1080, al massimo 2560x1600. Dentro ci sono la cella a colori pieni, `bw` con dither `floyd` e `bayer`, `bwr` e `bwry` con dither `no`, `floyd` e `bayer`, una cella `bwry` con `atkinson` e un riepilogo, in celle piccole quanto basta a stare nella finestra: il numero di colonne si sceglie perchè le celle somiglino alla finestra, e sotto ~1290x725 a 16:9 il riquadro informativo non entra più e la risposta è un 400 (la soglia cambia con la forma della finestra). Sotto ogni cella ci sono il suffisso dell'URL `/route` che la riproduce, tempo e RAM di generazione e il peso del corpo di `/route` a 1280x1280 (esatto per `arduino`, stimato per il JPEG). Ogni richiesta fa una chiamata alla Routes API (nessuna se il percorso è in cache) e una alla Static API: la base a colori, che ogni cella converte nella sua palette.
 
 ## Autenticazione
 
-Ogni chiamata a `/route` consuma quota delle API Google, quindi serve il token configurato in `ROUTEFINDER_TOKEN`. Il firmware lo manda nell'header `X-Routefinder-Token`; da browser, senza token, compare una pagina in cui incollarlo, che lo salva in un cookie HttpOnly e torna alla pagina richiesta. Senza `ROUTEFINDER_TOKEN` sul servizio nessuna richiesta passa.
+Ogni chiamata a `/route` consuma quota delle API Google, quindi serve il token configurato in `ROUTEFINDER_TOKEN`. Un client lo manda nell'header `X-Routefinder-Token`; da browser, senza token, compare una pagina in cui incollarlo, che lo salva in un cookie HttpOnly e torna alla pagina richiesta. Senza `ROUTEFINDER_TOKEN` sul servizio nessuna richiesta passa.
 
 ## Configurazione e deploy
 
 Render.com, free tier, come la webapp cinema (`render.yaml`). Variabili da impostare dal pannello di render:
 
 - `GOOGLE_MAPS_API_KEY`: chiave di un progetto Google Cloud con fatturazione attiva e con **Routes API** e **Maps Static API** abilitate; conviene limitarla a quelle due API.
-- `ROUTEFINDER_TOKEN`: stringa casuale lunga, la stessa che va in `Env.h` del firmware.
+- `ROUTEFINDER_TOKEN`: stringa casuale lunga, la stessa che si configura nei client.
 
-Costi: la preferenza `TRAFFIC_AWARE_OPTIMAL`, l'unica che ammette la rotta eco, porta ogni richiesta nello SKU Compute Routes Pro (5 000 chiamate gratuite al mese); la Static API sta in Essentials (10 000). Il firmware chiede un percorso a ogni ciclo di ~5 minuti nella fascia percorso, 24 richieste al giorno con la fascia 7-9: si resta abbondantemente nella soglia gratuita. Le risposte restano in cache 60 secondi, così un refresh del browser non paga una seconda chiamata, mentre ogni richiesta del firmware, distante un ciclo dalla precedente, va sempre in miss e porta il traffico aggiornato.
+Costi: la preferenza `TRAFFIC_AWARE_OPTIMAL`, l'unica che ammette la rotta eco, porta ogni richiesta nello SKU Compute Routes Pro (5 000 chiamate gratuite al mese); la Static API sta in Essentials (10 000). Ogni richiesta a `/route` fa una chiamata a ciascuna delle due API, quindi la soglia gratuita da 5 000 chiamate al mese regge circa 160 richieste al giorno. Le risposte restano in cache 60 secondi, così un refresh del browser non paga una seconda chiamata, mentre un client che interroga a distanza di qualche minuto va sempre in miss e porta il traffico aggiornato.
 
 ## Sviluppo
 

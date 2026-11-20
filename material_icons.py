@@ -1,7 +1,6 @@
 """
-Icone Material Symbols Rounded rese a 1 bit, dallo stesso font variabile delle
-icone meteo del firmware (icons/weather/source), con la stessa soglia a 128 di
-tools/weather_icons.py: niente grigi da diffondere attorno all'icona.
+Icone Material Symbols Rounded rese a 1 bit dal font variabile in assets/material,
+con soglia a 128: niente grigi da diffondere attorno all'icona.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ ASSET_DIR = Path(__file__).resolve().parent / "assets" / "material"
 FONT_PATH = ASSET_DIR / "MaterialSymbolsRounded.ttf"
 CODEPOINTS_PATH = ASSET_DIR / "MaterialSymbolsRounded.codepoints"
 
-# Assi Fill, Grade, Optical Size, Weight. Vuote come le icone meteo; optical
+# Assi Fill, Grade, Optical Size, Weight. Icone vuote (Fill 0); optical
 # size al minimo del font perchè le icone del riquadro stanno fra 16 e 30 px, e
 # peso 500 perchè a quella misura il tratto da 400 si spezza a 1 bit.
 AXES = (0, 0, 20, 500)

@@ -49,7 +49,7 @@ def _drawn_pixels(viewport: Viewport, path):
     return [viewport.project(lat, lng) for lat, lng in path]
 
 
-@pytest.mark.parametrize("scale,width,height", [(1, 610, 290), (1, 610, 325), (2, 1220, 580)])
+@pytest.mark.parametrize("scale,width,height", [(1, 600, 300), (1, 640, 480), (2, 1200, 600)])
 def test_fit_keeps_diagonal_route_out_of_forbidden_zones(scale, width, height):
     path = _diagonal()
     card = Rect(width - 200 * scale, 6 * scale, width - 6 * scale, 140 * scale)
@@ -67,16 +67,16 @@ def test_fit_keeps_diagonal_route_out_of_forbidden_zones(scale, width, height):
 
 def test_fit_prefers_highest_zoom_that_fits():
     path = _diagonal(start=(43.600, 13.500), end=(43.602, 13.503))
-    viewport = fit_viewport([path], [], 610, 290, [], margin=6, padding=6)
+    viewport = fit_viewport([path], [], 600, 300, [], margin=6, padding=6)
     assert viewport.zoom >= 16
-    tighter = fit_viewport([path], [], 610, 290, [], margin=6, padding=6, max_zoom=viewport.zoom + 1)
+    tighter = fit_viewport([path], [], 600, 300, [], margin=6, padding=6, max_zoom=viewport.zoom + 1)
     assert tighter.zoom == viewport.zoom
 
 
 def test_fit_accounts_for_marker_extent():
     path = [(43.60, 13.50), (43.60, 13.50)]
     marker = Marker(43.60, 13.50, -13, -28, 13, 2)
-    viewport = fit_viewport([path], [marker], 610, 290, [], margin=6, padding=0)
+    viewport = fit_viewport([path], [marker], 600, 300, [], margin=6, padding=0)
     x, y = viewport.project(43.60, 13.50)
     assert y - 28 >= 6 - 1
 
@@ -155,8 +155,8 @@ def test_formatting():
     assert renderer.format_distance(124_400) == "124 km"
 
 
-def test_gfx_font_metrics_match_firmware_comment():
-    # Layout_common.h: la cap height di FONT_BODY (FreeSans12pt7b) è 17 px.
+def test_gfx_font_cap_height_is_y_offset_of_capital_h():
+    # La cima della "H" di FreeSans12pt7b sta 17 px sopra la baseline (yOffset = -17).
     assert gfx_font.load("FreeSans12pt7b").cap_height == 17
 
 
@@ -169,36 +169,41 @@ def _fake_map(viewport: Viewport) -> Image.Image:
     return Image.new("RGB", (viewport.width, viewport.height), (200, 200, 200))
 
 
-@pytest.mark.parametrize("height,expected", [(290, 44660), (325, 50050)])
-def test_arduino_body_length_matches_firmware(height, expected):
+@pytest.mark.parametrize("width,height,colors,expected", [
+    (400, 300, "bwr", 2 * 50 * 300),
+    (301, 200, "bwry", 3 * 38 * 200),
+    (320, 240, "bw", 1 * 40 * 240),
+])
+def test_arduino_body_length_follows_plane_formula(width, height, colors, expected):
+    """Content-Length = piani * ceil(width/8) * height, anche con larghezza non multipla di 8."""
     result = routes_api.parse_response(_route_payload(), NOW)
-    body = renderer.render_route_image(result, 610, height, "arduino", "bwr", "floyd", _fake_map)
+    body = renderer.render_route_image(result, width, height, "arduino", colors, "floyd", _fake_map)
     assert len(body) == expected
 
 
 def test_static_map_keeps_google_colors():
     """Una sola base per ogni formato: solo lo stile del contenuto, nessun
     colore cambiato, la palette la applica il renderer."""
-    viewport = Viewport(43.6, 13.5, 11, 610, 290, 1)
+    viewport = Viewport(43.6, 13.5, 11, 600, 300, 1)
     styles = [v for k, v in static_map.build_params(viewport, "k") if k == "style"]
     assert styles == list(static_map.STYLE_CONTENT)
 
 
 def test_jpeg_render_and_scale_two():
     result = routes_api.parse_response(_route_payload(), NOW)
-    for width, height in [(610, 290), (1220, 580)]:
+    for width, height in [(600, 300), (1200, 600)]:
         body = renderer.render_route_image(result, width, height, "jpg", "rgb", "no", _fake_map)
         image = Image.open(__import__("io").BytesIO(body))
         assert image.size == (width, height)
 
 
 @pytest.mark.parametrize("colors", ["bw", "bwr", "bwry"])
-def test_jpeg_with_colors_stays_in_panel_palette(colors):
-    """Con colors il JPEG è l'anteprima del pannello: a meno degli artefatti di
+def test_jpeg_with_colors_stays_in_palette(colors):
+    """Con colors il JPEG è l'anteprima e-paper: a meno degli artefatti di
     compressione ogni pixel è un colore della palette, e il rosso c'è solo se la
     palette lo ha."""
     result = routes_api.parse_response(_route_payload(), NOW)
-    body = renderer.render_route_image(result, 610, 290, "jpg", colors, "floyd", _fake_map)
+    body = renderer.render_route_image(result, 600, 300, "jpg", colors, "floyd", _fake_map)
     pixels = np.array(Image.open(__import__("io").BytesIO(body)), dtype=np.int16)
     palette = np.array(PALETTES[colors], dtype=np.int16)
     distance = np.abs(pixels[:, :, None, :] - palette[None, None]).sum(-1).min(-1)
@@ -210,11 +215,11 @@ def test_jpeg_with_colors_stays_in_panel_palette(colors):
 def test_card_area_is_pure_palette():
     """Il riquadro si disegna dopo il dither: dentro non c'è nessun indice di grigio."""
     result = routes_api.parse_response(_route_payload(), NOW)
-    body = renderer.render_route_image(result, 610, 290, "arduino", "bwr", "floyd", _fake_map)
-    stride = (610 + 7) // 8
-    black = np.unpackbits(np.frombuffer(body[:stride * 290], dtype=np.uint8)).reshape(290, stride * 8)[:, :610]
+    body = renderer.render_route_image(result, 600, 300, "arduino", "bwr", "floyd", _fake_map)
+    stride = (600 + 7) // 8
+    black = np.unpackbits(np.frombuffer(body[:stride * 300], dtype=np.uint8)).reshape(300, stride * 8)[:, :600]
     card_w, card_h = renderer.card_size(renderer.card_rows(result))
-    left = 610 - renderer.MARGIN - card_w
+    left = 600 - renderer.MARGIN - card_w
     inner = black[renderer.MARGIN + 4:renderer.MARGIN + card_h - 4, left + 4:left + 8]
     # Margine sinistro interno della card, prima delle icone: tutto bianco (bit a 1).
     assert inner.all()
@@ -223,11 +228,11 @@ def test_card_area_is_pure_palette():
 @pytest.mark.parametrize("colors,rgb,plane", [("bwr", (255, 0, 0), 1), ("bwry", (255, 255, 0), 2)])
 def test_color_base_reaches_palette_accents(colors, rgb, plane):
     """La base nei colori di Google si converte nella palette completa: un'area
-    rossa o gialla della mappa resta rossa o gialla sul pannello."""
+    rossa o gialla della mappa resta rossa o gialla nei piani e-paper."""
     result = routes_api.parse_response(_route_payload(), NOW)
-    body = renderer.render_route_image(result, 610, 290, "arduino", colors, "floyd",
+    body = renderer.render_route_image(result, 600, 300, "arduino", colors, "floyd",
                                        lambda v: Image.new("RGB", (v.width, v.height), rgb))
-    size = (610 + 7) // 8 * 290
+    size = (600 + 7) // 8 * 300
     bits = np.unpackbits(np.frombuffer(body[plane * size:(plane + 1) * size], dtype=np.uint8))
     assert (bits == 0).mean() > 0.5
 
@@ -282,3 +287,12 @@ def test_example_measures_ram_once_per_size(monkeypatch):
     for _ in range(2):
         examples.render_examples(result, 1920, 1080, "/route?x", None, _fake_map)
     assert len(starts) == len([c for c in examples.CELLS if isinstance(c, tuple)])
+
+
+@pytest.mark.parametrize("canvas,landscape", [((1920, 1200), True), ((1100, 1000), True), ((900, 1400), False)])
+def test_example_grid_cells_resemble_the_canvas(canvas, landscape):
+    """Le celle hanno l'orientazione della tela: larghe in una finestra orizzontale,
+    alte in una verticale, senza proporzioni fisse imposte dal codice."""
+    result = routes_api.parse_response(_route_payload(), NOW)
+    grid = examples.grid_for(result, *canvas)
+    assert (grid.cell_w > grid.cell_h) == landscape

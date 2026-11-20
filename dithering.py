@@ -1,7 +1,8 @@
 """
 Quantizzazione e dithering per display e-paper.
 
-Copia di webapp/dithering.py, da tenere allineata. Port semplificato delle funzioni da ../GxEPD2_SOLUM_ESL/tools/epd_image_converter.pyw, senza dipendenze
+Copia di webapp/dithering.py, da tenere allineata. Port semplificato di un
+convertitore di immagini per e-paper, senza dipendenze
 Tk/GUI. Espone i 4 algoritmi di dithering (Floyd-Steinberg, Atkinson, Bayer 8x8,
 threshold) e le utility di packing MSB-first compatibili con GxEPD2.
 """
@@ -21,7 +22,7 @@ PALETTES: dict[str, list[tuple[int, int, int]]] = {
     "bwry": [(255, 255, 255), (0, 0, 0), (255, 0, 0), (255, 255, 0)],
 }
 
-# Ordine piani restituiti per ogni color_mode (fondamentale per il parser ESP32).
+# Ordine piani restituiti per ogni color_mode (fondamentale per il parser del client).
 PLANE_ORDER: dict[str, tuple[str, ...]] = {
     "bw":   ("black",),
     "bwr":  ("black", "red"),

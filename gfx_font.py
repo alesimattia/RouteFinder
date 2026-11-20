@@ -1,7 +1,7 @@
 """
 Font Adafruit GFX letti dai loro header .h e disegnati a 1 bit: sono gli stessi
-file che il firmware compila, quindi il testo del riquadro ha gli stessi pixel
-del resto del pannello. Parser portato da tools/layout_preview.py del firmware.
+file che compila la libreria Adafruit_GFX, quindi il testo ha gli stessi pixel
+che si otterrebbero su un display pilotato da quella libreria.
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ class GfxFont:
         tail = re.search(r"0x([0-9A-Fa-f]{2}),\s*0x([0-9A-Fa-f]{2}),\s*(\d+)\s*\};", text[text.rindex("GFXfont"):])
         self.first, self.last = int(tail.group(1), 16), int(tail.group(2), 16)
         self.y_advance = int(tail.group(3))
-        # Cap height come la intende il firmware: distanza fra la cima della "H" e
-        # la baseline, cioè -yOffset; l'inchiostro occupa anche la riga della baseline.
+        # Cap height come distanza fra la cima della "H" e la baseline, cioè -yOffset;
+        # l'inchiostro occupa anche la riga della baseline.
         cap = self.glyph("H")
         self.cap_height = -cap[5] if cap else self.y_advance // 2
 

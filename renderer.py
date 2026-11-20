@@ -3,7 +3,7 @@ Composizione dell'immagine del percorso: base cartografica, tracciati, marker e
 riquadro informativo in alto a destra.
 
 Lo stesso codice di disegno serve il JPEG a colori pieni e le immagini nella
-palette del pannello, piani e-paper o JPEG di anteprima: in queste la base si
+palette e-paper, piani 1bpp o JPEG di anteprima: in queste la base si
 quantizza prima, e tutto il resto si disegna dopo sugli indici di palette,
 quindi testo, icone e tracciati restano in colore pieno senza errore di dither
 attorno.
@@ -265,7 +265,7 @@ def compose_route_image(result: RouteResult, layout: RouteLayout, base: Image.Im
                         color_mode: str, dither: str) -> Image.Image:
     """
     Immagine prima della codifica: "RGB" a colori pieni con color_mode "rgb",
-    "P" nella palette del pannello altrimenti. `base` è la mappa del viewport di
+    "P" nella palette e-paper altrimenti. `base` è la mappa del viewport di
     `layout` e non viene modificata, quindi si può riusare fra più chiamate.
     """
     scale = layout.scale
@@ -328,7 +328,7 @@ def render_route_image(
 ) -> bytes:
     """
     Immagine finale: JPEG se fmt è "jpg", a colori pieni con color_mode "rgb" e
-    nella palette del pannello altrimenti; con "arduino" i piani e-paper
+    nella palette e-paper altrimenti; con "arduino" i piani 1bpp
     header-less di arduino_format. ValueError se il riquadro non entra nella
     misura richiesta.
     """

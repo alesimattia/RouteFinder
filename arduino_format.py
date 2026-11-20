@@ -1,11 +1,11 @@
 """
-Encoder binario header-less per consumo diretto da ESP32. Copia di
-webapp/arduino_format.py, da tenere allineata: è il contratto col firmware.
+Encoder binario header-less per consumo diretto da client embedded. Copia di
+webapp/arduino_format.py, da tenere allineata: è il contratto con i client.
 
 Il body HTTP contiene SOLO i piani 1bpp MSB-packed concatenati, senza magic,
-senza version, senza metadati: l'ESP32 ha gia' width/height/colors nella query
+senza version, senza metadati: il client ha già width/height/colors nella query
 string, quindi ogni parsing lato client è ridondante. Questo è il formato
-piu' efficiente possibile: stream -> buffer GxEPD2 con un readBytes().
+più efficiente possibile: stream -> buffer del display con un readBytes().
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from dithering import PLANE_ORDER, indices_to_channel_masks, pack_mask_msb
 
 def encode(indices: np.ndarray, color_mode: str) -> bytes:
     """
-    Concatena i piani 1bpp nel formato atteso dall'ESP32.
+    Concatena i piani 1bpp nel formato atteso dal client embedded.
 
     Ordine piani deterministico (vedi PLANE_ORDER in dithering.py):
         bw   -> [black]

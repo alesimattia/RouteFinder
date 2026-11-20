@@ -1,6 +1,6 @@
 """
 FastAPI app di routefinder: percorso più veloce col traffico fra due punti,
-servito come JPEG a colori pieni o come piani 1bpp per il pannello e-paper.
+servito come JPEG a colori pieni o come piani 1bpp per display e-paper.
 """
 
 from __future__ import annotations
@@ -57,25 +57,26 @@ API_KEY_ENV = "GOOGLE_MAPS_API_KEY"
 
 # Il traffico cambia in minuti: oltre questo tempo un percorso in cache sarebbe
 # un'informazione vecchia. Basta a non pagare due volte un refresh del browser, e
-# resta molto sotto il ciclo di ~5 minuti del firmware, che deve andare sempre in miss.
+# resta molto sotto l'intervallo di qualche minuto con cui un client periodico
+# richiede il percorso, che deve andare sempre in miss.
 ROUTE_CACHE_TTL_S = 60
 
 MIN_SIDE = 64
 
-# Palette del pannello quando la richiesta non la indica: default di
+# Palette e-paper quando la richiesta non la indica: default di
 # format=arduino e palette aggiunta all'URL di un JPEG con dither senza colors.
 DEFAULT_COLORS = "bwr"
 
 app = FastAPI(
     title="Routefinder",
-    description="Percorso più veloce col traffico per il pannello e-paper ESP32",
+    description="Percorso più veloce col traffico, come JPEG o come piani 1bpp per display e-paper",
     version="1.0.0",
 )
 
 
 class _ConditionalGZipMiddleware:
-    """GZip per le pagine testuali, mai sulle immagini: il firmware confronta il
-    Content-Length di /route con la misura attesa, e JPEG e PNG sono già compressi."""
+    """GZip per le pagine testuali, mai sulle immagini: un client embedded confronta
+    il Content-Length di /route con la misura attesa, e JPEG e PNG sono già compressi."""
 
     _SKIP_PATHS = frozenset({"/route", "/example"})
 
@@ -133,7 +134,7 @@ def _endpoints(origin: Optional[str], destination: Optional[str]) -> tuple[tuple
 
 
 def _check_size(width: int, height: int) -> None:
-    """400 fuori dai limiti, mai un clamp silenzioso: il firmware confronta il Content-Length."""
+    """400 fuori dai limiti, mai un clamp silenzioso: un client embedded confronta il Content-Length."""
     if not (MIN_SIDE <= width <= MAX_SIDE and MIN_SIDE <= height <= MAX_SIDE):
         raise HTTPException(status_code=400, detail=f"misura fra {MIN_SIDE} e {MAX_SIDE} px per lato")
 
@@ -167,8 +168,8 @@ def root():
 
 @app.get(HEALTH_PATH)
 def health():
-    """Liveness probe di render.yaml e bersaglio del ping di pre-warm del
-    firmware: aperto, perchè non tocca le API a pagamento."""
+    """Liveness probe di render.yaml e bersaglio di un eventuale ping di pre-warm
+    dei client: aperto, perchè non tocca le API a pagamento."""
     return {"status": "ok"}
 
 
@@ -205,7 +206,7 @@ def route(
     height: int = Query(MAX_SIDE, description=f"Altezza in px, al massimo {MAX_SIDE}; senza, la massima."),
     format: Literal["jpg", "arduino"] = Query("jpg"),
     colors: Optional[Literal["bw", "bwr", "bwry"]] = Query(
-        None, description=f"Palette del pannello. Con format=arduino default {DEFAULT_COLORS}; con format=jpg "
+        None, description=f"Palette e-paper. Con format=arduino default {DEFAULT_COLORS}; con format=jpg "
                           "senza colors il JPEG è a colori pieni, e un dither senza colors rimanda all'URL "
                           f"con colors={DEFAULT_COLORS}."),
     dither: Optional[Literal["no", "floyd", "atkinson", "bayer"]] = Query(
@@ -217,7 +218,7 @@ def route(
     carburante se diversa, disegnato su mappa Google.
 
     format=jpg (default) è a colori pieni; con colors è un'anteprima nella
-    palette del pannello, quantizzata come format=arduino, a soglia se manca
+    palette e-paper, quantizzata come format=arduino, a soglia se manca
     dither. Un dither senza colors rimanda con 307 allo stesso URL con
     colors=DEFAULT_COLORS, così la palette scelta si vede nella barra degli
     indirizzi.
@@ -275,7 +276,7 @@ def example(
     """
     PNG grande quanto la viewport del browser con la stessa immagine del
     percorso fisso fra examples.ORIGIN e examples.DESTINATION, a colori pieni e
-    in ogni palette e dither del pannello, in celle piccole quanto basta a stare
+    in ogni palette e-paper e dither, in celle piccole quanto basta a stare
     nella tela, con tempo, RAM e peso a piena misura di ciascuna. Una chiamata
     alla Routes API (nessuna se il percorso è in cache) e una alla Static API,
     la base a colori che ogni cella converte nella sua palette.

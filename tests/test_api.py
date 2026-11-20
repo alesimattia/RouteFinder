@@ -103,11 +103,11 @@ def test_jpeg_default(client):
 def test_default_size_is_maximum(client):
     response = client.get(QUERY, headers={"X-Routefinder-Token": TOKEN})
     assert Image.open(io.BytesIO(response.content)).size == (main.MAX_SIDE, main.MAX_SIDE)
-    only_width = client.get(QUERY + "&width=610", headers={"X-Routefinder-Token": TOKEN})
-    assert Image.open(io.BytesIO(only_width.content)).size == (610, main.MAX_SIDE)
+    only_width = client.get(QUERY + "&width=600", headers={"X-Routefinder-Token": TOKEN})
+    assert Image.open(io.BytesIO(only_width.content)).size == (600, main.MAX_SIDE)
 
 
-def test_jpeg_with_colors_is_panel_preview(client):
+def test_jpeg_with_colors_is_palette_preview(client):
     response = client.get(QUERY + "&colors=bwr&dither=atkinson", headers={"X-Routefinder-Token": TOKEN})
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
@@ -117,7 +117,7 @@ def test_jpeg_with_colors_is_panel_preview(client):
 @pytest.mark.parametrize("colors", ["bw", "bwr", "bwry"])
 def test_jpeg_colors_without_dither_defaults_to_threshold(client, colors):
     headers = {"X-Routefinder-Token": TOKEN}
-    base = QUERY + f"&width=610&height=290&colors={colors}"
+    base = QUERY + f"&width=600&height=300&colors={colors}"
     default = client.get(base, headers=headers).content
     assert default == client.get(base + "&dither=no", headers=headers).content
     assert default != client.get(base + "&dither=floyd", headers=headers).content
@@ -126,7 +126,7 @@ def test_jpeg_colors_without_dither_defaults_to_threshold(client, colors):
 @pytest.mark.parametrize("colors", ["bw", "bwr", "bwry"])
 def test_arduino_dither_defaults_to_floyd_with_every_palette(client, colors):
     headers = {"X-Routefinder-Token": TOKEN}
-    base = QUERY + f"&format=arduino&width=610&height=290&colors={colors}"
+    base = QUERY + f"&format=arduino&width=600&height=300&colors={colors}"
     default = client.get(base, headers=headers).content
     assert default == client.get(base + "&dither=floyd", headers=headers).content
     assert default != client.get(base + "&dither=no", headers=headers).content
@@ -134,7 +134,7 @@ def test_arduino_dither_defaults_to_floyd_with_every_palette(client, colors):
 
 def test_arduino_without_colors_nor_dither_uses_floyd(client):
     headers = {"X-Routefinder-Token": TOKEN}
-    base = QUERY + "&format=arduino&width=610&height=290"
+    base = QUERY + "&format=arduino&width=600&height=300"
     assert client.get(base, headers=headers).content == \
         client.get(base + "&colors=bwr&dither=floyd", headers=headers).content
 
@@ -155,10 +155,11 @@ def test_jpeg_with_dither_only_redirects_to_default_palette(client):
 
 
 def test_arduino_exact_length_and_no_gzip(client):
-    response = client.get(QUERY + "&format=arduino&colors=bwr&dither=floyd&width=610&height=290",
+    response = client.get(QUERY + "&format=arduino&colors=bwr&dither=floyd&width=603&height=300",
                           headers={"X-Routefinder-Token": TOKEN, "Accept-Encoding": "gzip"})
     assert response.status_code == 200
-    assert response.headers["content-length"] == "44660"
+    # Due piani da ceil(603/8) = 76 byte per riga, 300 righe.
+    assert response.headers["content-length"] == str(2 * 76 * 300)
     assert "content-encoding" not in response.headers
 
 
@@ -240,7 +241,7 @@ def _decode_planes(body: bytes, colors: str, width: int, height: int) -> np.ndar
 
 
 def test_example_cells_match_route(client):
-    """Ogni cella del pannello è identica, pixel per pixel, ai piani che /route
+    """Ogni cella e-paper è identica, pixel per pixel, ai piani che /route
     restituisce con gli stessi parametri e la misura della cella."""
     headers = {"X-Routefinder-Token": TOKEN}
     canvas = np.array(Image.open(io.BytesIO(client.get(EXAMPLE, headers=headers).content)).convert("RGB"))
@@ -268,7 +269,7 @@ def _access_record(client_addr, path, status, method="GET"):
 
 @pytest.mark.parametrize("client_addr, path, status, kept", [
     ("10.231.26.208:44150", "/health", 200, False),   # health check interno di render
-    ("5.61.222.202:0", "/health", 200, True),         # pre-warm del firmware o browser, via proxy
+    ("5.61.222.202:0", "/health", 200, True),         # pre-warm di un client o browser, via proxy
     ("127.0.0.1:51000", "/health", 200, True),        # curl in locale
     ("10.231.26.208:44150", "/health", 503, True),    # health check fallito
     ("10.231.26.208:44150", "/docs", 200, True),      # altro path dalla rete interna

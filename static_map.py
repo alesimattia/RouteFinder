@@ -29,7 +29,7 @@ MAX_SCALE = 2
 MAX_SIDE = MAX_SIZE * MAX_SCALE
 REQUEST_TIMEOUT_S = 15
 
-# Contenuto della mappa, uguale per il JPEG e per il pannello: nessun simbolo e
+# Contenuto della mappa, uguale per il JPEG e per le palette e-paper: nessun simbolo e
 # solo i nomi delle località, che orientano senza affollare.
 STYLE_CONTENT = (
     "element:labels|visibility:off",
@@ -57,7 +57,7 @@ def scale_for(width: int, height: int) -> int:
 
 def build_params(viewport: Viewport, api_key: str) -> list[tuple[str, str]]:
     """Parametri della richiesta; lista di coppie perchè style si ripete. La
-    base è nei colori di Google per ogni formato: la palette del pannello la
+    base è nei colori di Google per ogni formato: la palette e-paper la
     applica il renderer."""
     size_w = math.ceil(viewport.width / viewport.scale)
     size_h = math.ceil(viewport.height / viewport.scale)
