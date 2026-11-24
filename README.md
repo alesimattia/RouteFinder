@@ -39,6 +39,7 @@ Render.com, free tier, come la webapp cinema (`render.yaml`). Variabili da impos
 
 - `GOOGLE_MAPS_API_KEY`: chiave di un progetto Google Cloud con fatturazione attiva e con **Routes API** e **Maps Static API** abilitate; conviene limitarla a quelle due API.
 - `ROUTEFINDER_TOKEN`: stringa casuale lunga, la stessa che si configura nei client.
+- `MALLOC_MMAP_THRESHOLD_`: `262144`, non segreta. Soglia fissa di mmap di glibc: su Linux, con più thread, l'allocatore trattiene molta più memoria di quella che serve (misurato sulla webapp cinema, stesso stack numpy e Pillow), e su render free ci sono 512 MB.
 
 Costi: la preferenza `TRAFFIC_AWARE_OPTIMAL`, l'unica che ammette la rotta eco, porta ogni richiesta nello SKU Compute Routes Pro (5 000 chiamate gratuite al mese); la Static API sta in Essentials (10 000). Ogni richiesta a `/route` fa una chiamata a ciascuna delle due API, quindi la soglia gratuita da 5 000 chiamate al mese regge circa 160 richieste al giorno. Le risposte restano in cache 60 secondi, così un refresh del browser non paga una seconda chiamata, mentre un client che interroga a distanza di qualche minuto va sempre in miss e porta il traffico aggiornato.
 

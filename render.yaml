@@ -15,3 +15,7 @@ services:
         sync: false
       - key: ROUTEFINDER_TOKEN
         sync: false
+      # Non segreta. Soglia fissa di mmap di glibc: senza, i buffer grandi di numpy e Pillow
+      # restano nelle arene dei thread e la memoria cresce oltre quella che serve.
+      - key: MALLOC_MMAP_THRESHOLD_
+        value: "262144"

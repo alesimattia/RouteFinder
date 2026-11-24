@@ -93,8 +93,10 @@ class _ConditionalGZipMiddleware:
 
 app.add_middleware(_ConditionalGZipMiddleware, minimum_size=500)
 
-_route_cache = TTLCache(ttl_seconds=ROUTE_CACHE_TTL_S)
-_image_cache = TTLCache(ttl_seconds=ROUTE_CACHE_TTL_S)
+# Il TTL non libera memoria da solo: i tetti di voci fermano la crescita su un servizio
+# che resta acceso per giorni, con chiavi che cambiano a ogni misura o formato richiesto.
+_route_cache = TTLCache(ttl_seconds=ROUTE_CACHE_TTL_S, max_entries=256)
+_image_cache = TTLCache(ttl_seconds=ROUTE_CACHE_TTL_S, max_entries=16)
 
 
 def parse_point(value: str, name: str) -> tuple[float, float]:
