@@ -276,6 +276,29 @@ def test_atkinson_matches_pixel_loop(size):
         assert (dithering._quantize_atkinson(image, palette) == _atkinson_reference(image, palette)).all()
 
 
+def _bayer_reference(img_rgb, palette_rgb):
+    """Bayer sull'immagine intera in un solo passaggio: la versione a blocchi deve
+    restituire gli stessi indici."""
+    arr = np.array(img_rgb, dtype=np.float32)
+    h, w, _ = arr.shape
+    norm = (dithering.BAYER_8X8 + 0.5) / 64.0 - 0.5
+    tiled = np.tile(norm, ((h + 7) // 8, (w + 7) // 8))[:h, :w]
+    flat = (arr + tiled[:, :, None] * 64.0).reshape(-1, 3)
+    palette = np.array(palette_rgb, dtype=np.float32)
+    diffs = flat[:, None, :] - palette[None, :, :]
+    return np.argmin(np.sum(diffs * diffs, axis=2), axis=1).astype(np.uint8).reshape(h, w)
+
+
+@pytest.mark.parametrize("size", [(1, 1), (9, 1), (1, 9), (13, 29), (64, 41)])
+def test_bayer_chunks_match_whole_image(size, monkeypatch):
+    # Blocchi di poche righe, che non sono multipli di 8, per attraversare i bordi dei blocchi.
+    monkeypatch.setattr(dithering, "_BAYER_CHUNK_PIXELS", 40)
+    rng = np.random.default_rng(size[0] * 100 + size[1])
+    image = Image.fromarray(rng.integers(0, 256, (size[1], size[0], 3), dtype=np.uint8))
+    for palette in PALETTES.values():
+        assert (dithering._quantize_bayer(image, palette) == _bayer_reference(image, palette)).all()
+
+
 def test_example_measures_ram_once_per_size(monkeypatch):
     """La RAM di una cella dipende dalla misura, non dalla mappa: alla seconda
     griglia della stessa misura tracemalloc non riparte."""

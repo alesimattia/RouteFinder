@@ -1,0 +1,74 @@
+# Suite pytest a ogni push su main e a ogni pull request. 
+# Su render l'Auto-Deploy "After CI Checks Pass" aspetta questo job, così una commit che rompe i test non va
+# in produzione. 
+#Le API Google sono sostituite da fixture: nessun segreto richiesto.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Settimanale: requirements.txt ha solo vincoli >=, quindi una nuova release di una dipendenza
+  # può rompere il prossimo deploy senza nessuna commit. Il fallimento arriva per email.
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Una seconda push sullo stesso ref annulla il job ancora in corso della precedente.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      # Stessa versione del deploy: render legge anch'esso .python-version.
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Dipendenze
+        run: pip install -r requirements-dev.txt
+
+      # Solo errori certi (nomi non definiti, import inutilizzati, sintassi), anche nei rami che
+      # nessun test esegue.
+      - name: ruff
+        run: ruff check --select F,E9 --output-format=github .
+
+      - name: pytest
+        run: python -m pytest -q -p no:cacheprovider
+
+      # Avvio con lo startCommand di render.yaml e l'ambiente di render: i test usano TestClient
+      # e non provano nè il comando nè un import con le variabili di produzione.
+      - name: Avvio come su render
+        env:
+          PORT: "10000"
+          RENDER: "true"
+          ROUTEFINDER_TOKEN: token-di-ci
+          GOOGLE_MAPS_API_KEY: chiave-di-ci
+        run: |
+          start_command=$(sed -n 's/^ *startCommand: *//p' render.yaml)
+          test -n "$start_command" || { echo "::error::startCommand non trovato in render.yaml"; exit 1; }
+          export MALLOC_MMAP_THRESHOLD_=$(grep -A1 'key: MALLOC_MMAP_THRESHOLD_' render.yaml | sed -n 's/.*value: *//p' | tr -d "\"' \r")
+          bash -c "exec $start_command" > server.log 2>&1 &
+          server_pid=$!
+          trap 'kill $server_pid 2>/dev/null; cat server.log' EXIT
+          for attempt in $(seq 1 30); do
+            curl -fs "http://127.0.0.1:$PORT/health" > /dev/null && break
+            sleep 1
+          done
+          health=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health")
+          route=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/route?origin=43.6,13.5&destination=43.5,13.3")
+          echo "/health $health, /route senza token $route"
+          test "$health" = 200 && test "$route" = 401

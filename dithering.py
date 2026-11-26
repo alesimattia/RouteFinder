@@ -81,35 +81,36 @@ def _quantize_threshold(img_rgb, palette_rgb):
     return np.array(quantized, dtype=np.uint8)
 
 
-@lru_cache(maxsize=8)
-def _bayer_tile(h: int, w: int) -> np.ndarray:
-    """
-    Tile della matrice di Bayer 8x8 normalizzata, croppato a (h, w).
-
-    Cacheato per (h, w): _quantize_bayer somma poi questo tile (read-only)
-    al canvas perturbato — non lo muta — quindi e' sicuro condividerlo tra
-    chiamate. Su 600x800 il tile pesa ~1.9MB float32: cachearlo evita
-    l'allocazione ad ogni richiesta dithered Bayer.
-    """
-    bayer_norm = (BAYER_8X8 + 0.5) / 64.0 - 0.5
-    tiles_y = (h + 7) // 8
-    tiles_x = (w + 7) // 8
-    return np.tile(bayer_norm, (tiles_y, tiles_x))[:h, :w]
+_BAYER_NORM = (BAYER_8X8 + 0.5) / 64.0 - 0.5
+_BAYER_AMPLITUDE = 64.0
+# Pixel per blocco del Bayer: le differenze verso la palette pesano fino a 48 byte a pixel,
+# quindi un blocco resta di pochi MB a qualunque misura dell'immagine.
+_BAYER_CHUNK_PIXELS = 1 << 16
 
 
 def _quantize_bayer(img_rgb, palette_rgb):
-    """Dithering ordinato su matrice di Bayer 8x8, pattern stabile nel tempo."""
-    arr = np.array(img_rgb, dtype=np.float32)
+    """
+    Dithering ordinato su matrice di Bayer 8x8, pattern stabile nel tempo.
+
+    Le distanze verso la palette si calcolano a blocchi di righe, perchè sull'immagine
+    intera l'array pixel x colori x 3 pesa centinaia di MB già a qualche megapixel. Ogni
+    pixel fa gli stessi conti, quindi gli indici non dipendono dalla misura del blocco.
+    """
+    arr = np.asarray(img_rgb)
     h, w, _ = arr.shape
-    bayer_tiled = _bayer_tile(h, w)
-    amplitude = 64.0
-    perturbed = arr + (bayer_tiled[:, :, None] * amplitude)
     palette = np.array(palette_rgb, dtype=np.float32)
-    flat = perturbed.reshape(-1, 3)
-    diffs = flat[:, None, :] - palette[None, :, :]
-    dists = np.sum(diffs * diffs, axis=2)
-    idx = np.argmin(dists, axis=1).astype(np.uint8)
-    return idx.reshape(h, w)
+    # Soglia di ogni colonna per ciascuna delle 8 righe della matrice, scelta poi con y % 8.
+    column_offsets = _BAYER_NORM[:, np.arange(w) % 8] * _BAYER_AMPLITUDE
+    rows_per_chunk = max(1, _BAYER_CHUNK_PIXELS // w)
+    result = np.empty((h, w), dtype=np.uint8)
+    for top in range(0, h, rows_per_chunk):
+        band = arr[top:top + rows_per_chunk].astype(np.float32)
+        rows = band.shape[0]
+        band += column_offsets[np.arange(top, top + rows) % 8][:, :, None]
+        diffs = band.reshape(-1, 3)[:, None, :] - palette[None, :, :]
+        dists = np.sum(diffs * diffs, axis=2)
+        result[top:top + rows] = np.argmin(dists, axis=1).reshape(rows, w)
+    return result
 
 
 def _quantize_atkinson(img_rgb, palette_rgb):

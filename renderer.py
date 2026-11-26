@@ -14,7 +14,7 @@ from __future__ import annotations
 import io
 import math
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable
 
 import numpy as np
 from PIL import Image, ImageDraw
