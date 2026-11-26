@@ -254,7 +254,8 @@ def route(
     try:
         body = _image_cache.get_or_compute(image_key, lambda: render_route_image(
             result, width, height, format, color_mode, dither_mode,
-            lambda viewport: fetch_base_map(viewport, api_key)))
+            lambda viewport: fetch_base_map(viewport, api_key),
+            route_key=(origin_point, destination_point, fuel)))
     except StaticMapError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     except ValueError as exc:

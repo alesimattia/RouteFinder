@@ -14,7 +14,7 @@ from __future__ import annotations
 import io
 import math
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Hashable, Optional
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -22,6 +22,7 @@ from PIL import Image, ImageDraw
 import gfx_font
 import material_icons
 from arduino_format import encode as encode_arduino
+from cache import TTLCache
 from dithering import PALETTES, indices_to_p_image, quantize
 from map_fit import Marker, Rect, Viewport, fit_viewport
 from routes_api import RouteInfo, RouteResult
@@ -40,10 +41,10 @@ ORIGIN_SIDE = 18
 DESTINATION_SIDE = 26
 ICON_HALO = 2
 
-CARD_PADDING = 10
-CARD_ROW_GAP = 7
-CARD_ICON_GAP = 8
-CARD_RADIUS = 10
+CARD_PADDING = 6
+CARD_ROW_GAP = 4
+CARD_ICON_GAP = 5
+CARD_RADIUS = 8
 CARD_BORDER = 2
 
 # Oltre questo ritardo la riga del traffico passa al rosso.
@@ -57,7 +58,7 @@ GOOGLE_ATTRIBUTION = (210, 16)
 # Qualità del JPEG a colori pieni, il formato di default di /route.
 JPEG_QUALITY = 80
 
-FONT_MAIN = "FreeSansBold18pt7b"
+FONT_MAIN = "FreeSans17pt7b"
 FONT_BODY = "FreeSans12pt7b"
 FONT_SMALL = "FreeSans9pt7b"
 
@@ -70,6 +71,32 @@ class CardRow:
     text: str
     font: str
     color: str
+
+
+@dataclass(frozen=True)
+class CardRowKind:
+    """Una riga possibile del riquadro: icona Material, font GFX e testo di riserva,
+    il più largo realistico che la riga può avere con un tragitto sotto l'ora."""
+
+    icon: str
+    font: str
+    reserve_text: str
+
+
+# Le righe possibili nell'ordine di lettura. Nel riquadro stabile di /route i testi
+# di riserva fissano la larghezza anche quando la riga ritardo o la riga eco non ci sono.
+DURATION_ROW = CardRowKind("schedule", FONT_MAIN, "59 min")
+DELAY_ROW = CardRowKind("traffic", FONT_BODY, "+59 min")
+DISTANCE_ROW = CardRowKind("straighten", FONT_BODY, "99,9 km")
+ECO_ROW = CardRowKind("eco", FONT_BODY, "+59 min -9,9 L")
+UPDATE_ROW = CardRowKind("update", FONT_SMALL, "agg. 88:88")
+CARD_ROW_KINDS = (DURATION_ROW, DELAY_ROW, DISTANCE_ROW, ECO_ROW, UPDATE_ROW)
+
+# Ultima viewport per percorso e misura: solo centro e zoom, nessun contenuto
+# cartografico, quindi può durare ore senza toccare i termini di Google.
+VIEWPORT_CACHE_TTL_S = 6 * 3600
+VIEWPORT_CACHE_MAX_ENTRIES = 32
+_viewport_cache = TTLCache(ttl_seconds=VIEWPORT_CACHE_TTL_S, max_entries=VIEWPORT_CACHE_MAX_ENTRIES)
 
 
 def format_duration(seconds: int) -> str:
@@ -93,16 +120,21 @@ def format_liters(microliters: int) -> str:
     return f"{microliters / 1e6:.1f}".replace(".", ",") + " L"
 
 
+def _row(kind: CardRowKind, text: str, color: str = "black") -> CardRow:
+    """Riga del riquadro di un tipo noto: icona e font vengono dal tipo."""
+    return CardRow(kind.icon, text, kind.font, color)
+
+
 def card_rows(result: RouteResult) -> list[CardRow]:
     """Righe del riquadro nell'ordine di lettura: tempo stimato, ritardo,
     distanza, alternativa eco se esiste, ora del calcolo."""
     fastest = result.fastest
-    rows = [CardRow("schedule", format_duration(fastest.duration_s), FONT_MAIN, "black")]
+    rows = [_row(DURATION_ROW, format_duration(fastest.duration_s))]
     delay = fastest.delay_s
     if delay is not None:
-        rows.append(CardRow("traffic", "+" + format_duration(delay), FONT_BODY,
-                            "red" if delay >= DELAY_ALERT_S else "black"))
-    rows.append(CardRow("straighten", format_distance(fastest.distance_m), FONT_BODY, "black"))
+        rows.append(_row(DELAY_ROW, "+" + format_duration(delay),
+                         "red" if delay >= DELAY_ALERT_S else "black"))
+    rows.append(_row(DISTANCE_ROW, format_distance(fastest.distance_m)))
     eco = result.eco
     if eco is not None:
         text = "+" + format_duration(eco.duration_s - fastest.duration_s)
@@ -110,34 +142,54 @@ def card_rows(result: RouteResult) -> list[CardRow]:
             saved = fastest.fuel_microliters - eco.fuel_microliters
             if saved > 0:
                 text += " -" + format_liters(saved)
-        rows.append(CardRow("eco", text, FONT_BODY, "black"))
-    rows.append(CardRow("update", "agg. " + result.computed_at.strftime("%H:%M"), FONT_SMALL, "black"))
+        rows.append(_row(ECO_ROW, text))
+    rows.append(_row(UPDATE_ROW, "agg. " + result.computed_at.strftime("%H:%M")))
     return rows
 
 
 def _icon_side(font: gfx_font.GfxFont) -> int:
-    """Lato dell'icona per una riga: un po' più alta delle maiuscole, come le
-    icone accanto al testo nelle linee guida Material."""
-    return int(round(font.cap_height * 1.4))
+    """Lato dell'icona per una riga: poco più alta delle maiuscole, come le
+    icone accanto al testo nelle linee guida Material, ma compatta perchè il
+    riquadro copra meno mappa."""
+    return int(round(font.cap_height * 1.2))
 
 
-def card_size(rows: list[CardRow]) -> tuple[int, int]:
-    """Larghezza e altezza del riquadro a scale=1."""
-    width = 0
+def _row_width(font_name: str, text: str) -> int:
+    """Larghezza a scale=1 di una riga: icona, spazio e avanzata del testo, non
+    il suo inchiostro, che cambia di un pixel o due da una cifra all'altra."""
+    font = gfx_font.load(font_name)
+    return _icon_side(font) + CARD_ICON_GAP + font.advance(text)
+
+
+def card_size(rows: list[CardRow], stable: bool = False) -> tuple[int, int]:
+    """
+    Larghezza e altezza del riquadro a scale=1. La larghezza è quella del testo
+    reale (inchiostro); con `stable` è invece il massimo fra le avanzate dei testi
+    reali e quelle dei testi di riserva di ogni riga possibile, così il bordo sinistro
+    non si muove fra due richieste dello stesso percorso e un testo oltre la riserva,
+    per esempio un tragitto di un'ora o più, allarga il riquadro.
+    """
+    width = max(_row_width(kind.font, kind.reserve_text) for kind in CARD_ROW_KINDS) if stable else 0
     height = 0
     for row in rows:
         font = gfx_font.load(row.font)
         side = _icon_side(font)
-        width = max(width, side + CARD_ICON_GAP + font.text_bounds(row.text)[2])
+        if stable:
+            width = max(width, _row_width(row.font, row.text))
+        else:
+            width = max(width, side + CARD_ICON_GAP + font.text_bounds(row.text)[2])
         height += max(side, font.cap_height)
     height += CARD_ROW_GAP * (len(rows) - 1)
     return width + 2 * CARD_PADDING, height + 2 * CARD_PADDING
 
 
-def draw_card(rows: list[CardRow], colors: dict[str, object], mode: str) -> Image.Image:
+def draw_card(rows: list[CardRow], colors: dict[str, object], mode: str,
+              width: Optional[int] = None) -> Image.Image:
     """Riquadro a scale=1 come immagine a sè, nel modo dell'immagine finale:
-    card bianca ad angoli arrotondati, righe icona più testo su una griglia."""
-    width, height = card_size(rows)
+    card bianca ad angoli arrotondati, righe icona più testo su una griglia.
+    `width` è quella del layout (a scale=1); senza, la misura del testo reale."""
+    measured_width, height = card_size(rows)
+    width = measured_width if width is None else width
     card = Image.new(mode, (width, height), colors["white"])
     if mode == "P":
         card.putpalette(_palette_bytes(colors))
@@ -239,12 +291,37 @@ class RouteLayout:
     viewport: Viewport
 
 
-def route_layout(result: RouteResult, width: int, height: int) -> RouteLayout:
+def _stable_viewport(key: Hashable, fit: Callable[[Optional[Viewport]], Viewport]) -> Viewport:
+    """
+    Viewport dell'ultimo fit con la stessa chiave se è ancora ammissibile, altrimenti
+    un fit nuovo; il risultato sostituisce la voce in cache e ne rinnova la scadenza.
+    Evita che la mappa si sposti di un pixel fra due richieste dello stesso percorso.
+    """
+    computed: list[bool] = []
+
+    def first_fit() -> Viewport:
+        computed.append(True)
+        return fit(None)
+
+    viewport = _viewport_cache.get_or_compute(key, first_fit)
+    if not computed:
+        viewport = fit(viewport)
+    _viewport_cache.set(key, viewport)
+    return viewport
+
+
+def route_layout(result: RouteResult, width: int, height: int,
+                 route_key: Optional[Hashable] = None) -> RouteLayout:
     """Riquadro in alto a destra e fit della mappa con il tracciato fuori dalle
-    zone vietate; ValueError se il riquadro non entra nella misura richiesta."""
+    zone vietate; ValueError se il riquadro non entra nella misura richiesta.
+    Con `route_key` (origine, destinazione e carburante, che passa solo /route)
+    l'immagine è stabile fra richieste: riquadro a larghezza fissa e viewport
+    dell'ultima richiesta dello stesso percorso e della stessa misura, riusata
+    finchè è ammissibile. Senza (/example) il riquadro è quello del testo reale e
+    il fit parte sempre da zero."""
     scale = scale_for(width, height)
     rows = card_rows(result)
-    card_w, card_h = (v * scale for v in card_size(rows))
+    card_w, card_h = (v * scale for v in card_size(rows, stable=route_key is not None))
     margin = MARGIN * scale
     if card_w + 2 * margin > width or card_h + 2 * margin > height:
         raise ValueError(f"misura {width}x{height} troppo piccola per il riquadro {card_w}x{card_h}")
@@ -256,8 +333,16 @@ def route_layout(result: RouteResult, width: int, height: int) -> RouteLayout:
         Rect(width - GOOGLE_ATTRIBUTION[0] * scale, height - GOOGLE_ATTRIBUTION[1] * scale, width - 1, height - 1),
     ]
     paths = [result.fastest.points] + ([result.eco.points] if result.eco else [])
-    viewport = fit_viewport(paths, _markers(result.fastest, scale), width, height, forbidden,
-                            margin=margin, padding=LINE_PADDING * scale, scale=scale)
+    markers = _markers(result.fastest, scale)
+
+    def fit(prefer: Optional[Viewport]) -> Viewport:
+        return fit_viewport(paths, markers, width, height, forbidden, margin=margin,
+                            padding=LINE_PADDING * scale, scale=scale, prefer=prefer)
+
+    if route_key is None:
+        viewport = fit(None)
+    else:
+        viewport = _stable_viewport((route_key, width, height, scale), fit)
     return RouteLayout(scale, rows, card_left, card_top, card_w, card_h, viewport)
 
 
@@ -301,7 +386,7 @@ def compose_route_image(result: RouteResult, layout: RouteLayout, base: Image.Im
     _paste_icon(image, colors, "location_on", side_d, int(round(dx)) - side_d // 2,
                 int(round(dy)) - tip, "black", ICON_HALO * scale)
 
-    card = draw_card(layout.rows, colors, mode)
+    card = draw_card(layout.rows, colors, mode, layout.card_w // scale)
     if scale != 1:
         card = card.resize((layout.card_w, layout.card_h), Image.NEAREST)
     image.paste(card, (layout.card_left, layout.card_top))
@@ -325,14 +410,15 @@ def render_route_image(
     color_mode: str,
     dither: str,
     fetch_map: Callable[[Viewport], Image.Image],
+    route_key: Optional[Hashable] = None,
 ) -> bytes:
     """
     Immagine finale: JPEG se fmt è "jpg", a colori pieni con color_mode "rgb" e
     nella palette e-paper altrimenti; con "arduino" i piani 1bpp
     header-less di arduino_format. ValueError se il riquadro non entra nella
-    misura richiesta.
+    misura richiesta. `route_key` è quello di route_layout().
     """
-    layout = route_layout(result, width, height)
+    layout = route_layout(result, width, height, route_key)
     image = compose_route_image(result, layout, fetch_map(layout.viewport), color_mode, dither)
     if fmt == "jpg":
         return encode_jpeg(image)

@@ -3,6 +3,7 @@ formato arduino e testo del riquadro."""
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -81,6 +82,54 @@ def test_fit_accounts_for_marker_extent():
     assert y - 28 >= 6 - 1
 
 
+def _shifted(viewport: Viewport, dx_px: int, dy_px: int, zoom: int | None = None) -> Viewport:
+    """Viewport con il centro spostato di pixel interi (allo zoom indicato, se dato)."""
+    zoom = viewport.zoom if zoom is None else zoom
+    k = 2 ** zoom * viewport.scale
+    cx, cy = world_xy(viewport.center_lat, viewport.center_lng)
+    lat, lng = world_to_latlng(cx + dx_px / k, cy + dy_px / k)
+    return Viewport(round(lat, 6), round(lng, 6), zoom, viewport.width, viewport.height, viewport.scale)
+
+
+@pytest.mark.parametrize("scale,width,height", [(1, 600, 300), (1, 640, 480), (2, 1200, 600)])
+def test_fit_returns_admissible_prefer_unchanged(scale, width, height):
+    path = _diagonal()
+    card = Rect(width - 200 * scale, 6 * scale, width - 6 * scale, 140 * scale)
+    logo = Rect(0, height - 28 * scale, 72 * scale, height - 1)
+    args = ([path], [], width, height, [card, logo])
+    kwargs = dict(margin=6 * scale, padding=6 * scale, scale=scale)
+    first = fit_viewport(*args, **kwargs)
+    assert fit_viewport(*args, **kwargs, prefer=first) == first
+
+
+def test_fit_keeps_prefer_that_the_plain_search_would_not_choose():
+    """Con uno zoom basso il tracciato è un punto: ogni traslazione ammissibile vale, e
+    `prefer` vince anche se la ricerca normale sceglierebbe un'altra viewport."""
+    path = _diagonal(start=(43.600, 13.500), end=(43.602, 13.503))
+    kwargs = dict(margin=6, padding=6, max_zoom=14)
+    plain = fit_viewport([path], [], 600, 300, [], **kwargs)
+    assert plain.zoom == 14
+    for prefer in (_shifted(plain, 40, -25), _shifted(plain, -90, 30, zoom=13)):
+        kept = fit_viewport([path], [], 600, 300, [], **kwargs, prefer=prefer)
+        assert kept == prefer and kept != plain
+
+
+def test_fit_recomputes_when_prefer_is_not_admissible():
+    path = _diagonal(start=(43.600, 13.500), end=(43.602, 13.503))
+    kwargs = dict(margin=6, padding=6, max_zoom=14)
+    plain = fit_viewport([path], [], 600, 300, [], **kwargs)
+    # Il tracciato uscirebbe dall'immagine.
+    assert fit_viewport([path], [], 600, 300, [], **kwargs, prefer=_shifted(plain, 450, 0)) == plain
+    # Il tracciato cadrebbe nella zona vietata, che coincide con il centro dell'immagine.
+    forbidden = [Rect(250, 100, 350, 200)]
+    blocked = fit_viewport([path], [], 600, 300, forbidden, **kwargs)
+    assert blocked != plain
+    assert fit_viewport([path], [], 600, 300, forbidden, **kwargs, prefer=plain) == blocked
+    # Una prefer di un'altra misura non si usa.
+    other_size = Viewport(plain.center_lat, plain.center_lng, plain.zoom, 640, 300, 1)
+    assert fit_viewport([path], [], 600, 300, [], **kwargs, prefer=_shifted(other_size, 40, 0)) == plain
+
+
 def _route_payload(same_eco=False):
     fast = polyline_encode([(43.60, 13.50), (43.61, 13.52), (43.62, 13.55)])
     eco = fast if same_eco else polyline_encode([(43.60, 13.50), (43.59, 13.53), (43.62, 13.55)])
@@ -142,12 +191,180 @@ def test_parse_duration_formats():
         routes_api.parse_duration("12m")
 
 
+class _FakeResponse:
+    """Risposta HTTP 200 di Google con un corpo qualsiasi, per compute_routes()."""
+
+    status_code = 200
+
+    def __init__(self, body: str):
+        self.text = body
+
+    def json(self):
+        return json.loads(self.text)
+
+
+class _FakeSession:
+    """Sessione che restituisce sempre la stessa risposta, come requests.Session.post."""
+
+    def __init__(self, response):
+        self._response = response
+
+    def post(self, *args, **kwargs):
+        return self._response
+
+
+INVALID_ROUTES_BODIES = [
+    "<html>gateway</html>",
+    "[]",
+    '{"routes": "x"}',
+    '{"routes": [{"duration": "10s", "polyline": "oops"}]}',
+    '{"routes": [{"duration": "10s", "distanceMeters": "abc", "polyline": {"encodedPolyline": "_p~iF~ps|U"}}]}',
+    '{"routes": [{"duration": "infs", "polyline": {"encodedPolyline": "_p~iF~ps|U"}}]}',
+]
+
+
+@pytest.mark.parametrize("body", INVALID_ROUTES_BODIES)
+def test_compute_routes_turns_an_invalid_200_body_into_routes_error(body):
+    session = _FakeSession(_FakeResponse(body))
+    with pytest.raises(routes_api.RoutesError):
+        routes_api.compute_routes((43.6, 13.5), (43.5, 13.3), "gasoline", "chiave", session=session)
+
+
+def test_compute_routes_parses_a_valid_200_body():
+    session = _FakeSession(_FakeResponse(json.dumps(_route_payload())))
+    result = routes_api.compute_routes((43.6, 13.5), (43.5, 13.3), "gasoline", "chiave", session=session)
+    assert result.fastest.duration_s == 1500
+
+
 def test_card_rows_text_is_ascii_and_complete():
     rows = renderer.card_rows(routes_api.parse_response(_route_payload(), NOW))
     texts = [r.text for r in rows]
     assert texts == ["25 min", "+5 min", "18,4 km", "+3 min -0,4 L", "agg. 07:42"]
     assert rows[1].color == "red"
     assert all(" " <= c <= "~" for t in texts for c in t)
+
+
+def _card_width(duration_s=1500, with_delay=True, with_eco=True, computed_at=NOW, stable=True) -> int:
+    """Larghezza a scale=1 del riquadro di un percorso con durata e righe date."""
+    payload = _route_payload(same_eco=not with_eco)
+    fastest = payload["routes"][0]
+    fastest["duration"] = f"{duration_s}s"
+    if not with_delay:
+        del fastest["staticDuration"]
+    result = routes_api.parse_response(payload, computed_at)
+    assert (result.fastest.delay_s is not None) == with_delay and (result.eco is not None) == with_eco
+    return renderer.card_size(renderer.card_rows(result), stable=stable)[0]
+
+
+def test_stable_card_width_is_fixed_for_routes_under_one_hour():
+    """Con le avanzate dei glifi e i testi di riserva la larghezza non dipende da
+    durata ("35 min", "41 min"), ora di calcolo, riga ritardo o riga eco: 187 px a scale=1."""
+    times = (NOW, NOW.replace(hour=11, minute=59), NOW.replace(hour=7, minute=15))
+    widths = {_card_width(duration_s, with_delay, with_eco, computed_at)
+              for duration_s in (2100, 2460, 600)
+              for with_delay in (True, False)
+              for with_eco in (True, False)
+              for computed_at in times}
+    assert widths == {187}
+
+
+def test_stable_card_width_grows_for_text_wider_than_the_reserve():
+    """Un tragitto di un'ora o più ("1 h 05 min") è più largo della riserva "59 min"."""
+    assert _card_width(duration_s=3900) > 187
+
+
+def test_card_width_without_stable_follows_the_real_text():
+    """Senza `stable` (/example) il riquadro è largo quanto l'inchiostro del testo reale."""
+    assert _card_width(stable=False) == 170
+    assert _card_width(with_eco=False, stable=False) == 137
+
+
+def test_card_reserve_texts_fit_inside_their_row_advance():
+    """L'inchiostro di ogni testo, reale o di riserva, sta dentro l'avanzata che dimensiona
+    il riquadro, quindi il padding destro non viene mai eroso."""
+    rows = renderer.card_rows(routes_api.parse_response(_route_payload(), NOW))
+    samples = [(kind.font, kind.reserve_text) for kind in renderer.CARD_ROW_KINDS]
+    samples += [(row.font, row.text) for row in rows]
+    for font_name, text in samples:
+        font = gfx_font.load(font_name)
+        x1, _, w, _ = font.text_bounds(text)
+        assert x1 + w <= font.advance(text), (font_name, text)
+
+
+def test_draw_card_has_the_measured_size():
+    result = routes_api.parse_response(_route_payload(), NOW)
+    rows = renderer.card_rows(result)
+    _, colors = renderer._color_table("bwr")
+    assert renderer.draw_card(rows, colors, "P").size == renderer.card_size(rows)
+    stable_size = renderer.card_size(rows, stable=True)
+    assert renderer.draw_card(rows, colors, "P", stable_size[0]).size == stable_size
+
+
+def _noisy_map(viewport: Viewport) -> Image.Image:
+    """Base di rumore che dipende dalla viewport: se il fit si sposta, il dither cambia ovunque."""
+    seed = abs(round(viewport.center_lat * 1e6)) * 31 + abs(round(viewport.center_lng * 1e6)) + viewport.zoom
+    rng = np.random.default_rng(seed)
+    return Image.fromarray(rng.integers(0, 256, (viewport.height, viewport.width, 3), dtype=np.uint8))
+
+
+def test_frames_of_the_same_route_differ_only_inside_the_card():
+    """Con la chiave di /route, durata e ora diverse non spostano il bordo del riquadro
+    nè il fit: fuori dal riquadro i piani sono identici bit per bit, anche con una base
+    che il dither riempie di punti neri e rossi. Le chiavi sono distinte perchè la
+    viewport ricordata non mascheri la larghezza fissa."""
+    width, height = 600, 300
+    renders = []
+    for index, (duration_s, computed_at) in enumerate(((1500, NOW.replace(hour=7, minute=15)),
+                                                       (1000, NOW.replace(hour=7, minute=20)))):
+        payload = _route_payload()
+        payload["routes"][0]["duration"] = f"{duration_s}s"
+        result = routes_api.parse_response(payload, computed_at)
+        body = renderer.render_route_image(result, width, height, "arduino", "bwr", "floyd", _noisy_map,
+                                           route_key=("frame", index))
+        stride = (width + 7) // 8
+        planes = [np.unpackbits(np.frombuffer(body[i * stride * height:(i + 1) * stride * height], dtype=np.uint8))
+                  .reshape(height, stride * 8)[:, :width] for i in range(2)]
+        renders.append((result, planes))
+    card_w, card_h = renderer.card_size(renderer.card_rows(renders[0][0]), stable=True)
+    outside = np.ones((height, width), dtype=bool)
+    outside[:renderer.MARGIN + card_h + 1, width - renderer.MARGIN - card_w - 1:] = False
+    for plane_a, plane_b in zip(renders[0][1], renders[1][1]):
+        assert (plane_a[outside] == plane_b[outside]).all()
+    assert any((a != b).any() for a, b in zip(renders[0][1], renders[1][1]))
+
+
+def test_route_layout_reuses_the_viewport_of_the_same_route_and_size(monkeypatch):
+    result = routes_api.parse_response(_route_payload(), NOW)
+    preferred = []
+    real_fit = renderer.fit_viewport
+
+    def recording_fit(*args, **kwargs):
+        preferred.append(kwargs.get("prefer"))
+        return real_fit(*args, **kwargs)
+
+    monkeypatch.setattr(renderer, "fit_viewport", recording_fit)
+    key = ((43.6158, 13.5189), (43.5, 13.3), "gasoline")
+    first = renderer.route_layout(result, 600, 300, key).viewport
+    second = renderer.route_layout(result, 600, 300, key).viewport
+    assert preferred == [None, first] and second == first
+    # Un'altra misura, un altro percorso o nessuna chiave non riusano la viewport.
+    renderer.route_layout(result, 640, 480, key)
+    renderer.route_layout(result, 600, 300, ((1.0, 2.0), (3.0, 4.0), "gasoline"))
+    renderer.route_layout(result, 600, 300)
+    assert preferred[2:] == [None, None, None]
+
+
+def test_route_layout_keeps_the_remembered_viewport_when_the_card_shrinks():
+    """Senza la rotta eco il riquadro è più basso e il tracciato un sottoinsieme del
+    precedente: la viewport ricordata resta ammissibile e non si sposta, mentre un fit
+    da zero la porterebbe altrove."""
+    key = ((43.6158, 13.5189), (43.5, 13.3), "gasoline")
+    with_eco = routes_api.parse_response(_route_payload(), NOW)
+    without_eco = routes_api.parse_response(_route_payload(same_eco=True), NOW)
+    first = renderer.route_layout(with_eco, 600, 300, key).viewport
+    fresh = renderer.route_layout(without_eco, 600, 300).viewport
+    assert fresh != first
+    assert renderer.route_layout(without_eco, 600, 300, key).viewport == first
 
 
 def test_formatting():
@@ -347,6 +564,19 @@ def test_example_measures_ram_once_per_size(monkeypatch):
     for _ in range(2):
         examples.render_examples(result, 1920, 1080, "/route?x", None, _fake_map)
     assert len(starts) == len([c for c in examples.CELLS if isinstance(c, tuple)])
+
+
+def test_example_threshold_at_16_9_follows_the_real_text_width():
+    """/example non usa il riquadro a larghezza fissa: a 16:9 con il riquadro completo
+    (eco e ritardo, 170 px di testo reale) la soglia è 1223x688."""
+    result = routes_api.parse_response(_route_payload(), NOW)
+    for canvas in [(1223, 688), (1225, 689), (1280, 720)]:
+        examples.grid_for(result, *canvas)
+    for canvas in [(1222, 687), (1200, 675)]:
+        with pytest.raises(ValueError):
+            examples.grid_for(result, *canvas)
+    # Senza la riga eco il riquadro è più stretto e la soglia scende.
+    examples.grid_for(routes_api.parse_response(_route_payload(same_eco=True), NOW), 1200, 675)
 
 
 @pytest.mark.parametrize("canvas,landscape", [((1920, 1200), True), ((1100, 1000), True), ((900, 1400), False)])

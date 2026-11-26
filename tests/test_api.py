@@ -17,7 +17,7 @@ import main
 import renderer
 import routes_api
 from dithering import PALETTES, PLANE_ORDER
-from tests.test_core import _route_payload
+from tests.test_core import INVALID_ROUTES_BODIES, _FakeResponse, _route_payload
 
 
 TOKEN = "segreto-di-test"
@@ -163,6 +163,17 @@ def test_arduino_exact_length_and_no_gzip(client):
     assert "content-encoding" not in response.headers
 
 
+@pytest.mark.parametrize("body", INVALID_ROUTES_BODIES)
+def test_invalid_google_200_body_is_a_502_like_other_google_failures(client, monkeypatch, body):
+    """Un 200 con corpo che non è JSON o non ha la forma attesa non diventa un 500."""
+    monkeypatch.setattr(main, "compute_routes", routes_api.compute_routes)
+    monkeypatch.setattr(routes_api.requests, "post", lambda *args, **kwargs: _FakeResponse(body))
+    response = client.get(QUERY, headers={"X-Routefinder-Token": TOKEN})
+    assert response.status_code == 502
+    assert body not in response.text
+    assert client.calls["maps"] == 0
+
+
 def test_route_cache_avoids_second_google_call(client):
     headers = {"X-Routefinder-Token": TOKEN}
     client.get(QUERY, headers=headers)
@@ -229,6 +240,25 @@ def test_example_rejects_canvas_too_small_or_too_large(client, size):
     assert response.status_code == 400
 
 
+def test_only_route_asks_for_the_stable_layout(client, monkeypatch):
+    """/route passa la chiave del percorso, che abilita riquadro a larghezza fissa e
+    viewport ricordata; /example no, quindi tiene il riquadro del testo reale."""
+    keys = []
+    real_layout = renderer.route_layout
+
+    def recording_layout(result, width, height, route_key=None):
+        keys.append(route_key)
+        return real_layout(result, width, height, route_key)
+
+    monkeypatch.setattr(renderer, "route_layout", recording_layout)
+    headers = {"X-Routefinder-Token": TOKEN}
+    client.get(QUERY + "&width=600&height=300", headers=headers)
+    assert keys == [((43.6158, 13.5189), (43.5, 13.3), "gasoline")]
+    keys.clear()
+    assert client.get(EXAMPLE, headers=headers).status_code == 200
+    assert keys and all(key is None for key in keys)
+
+
 def _decode_planes(body: bytes, colors: str, width: int, height: int) -> np.ndarray:
     """Piani di format=arduino riportati a RGB, per confrontarli con la griglia."""
     stride = (width + 7) // 8
@@ -240,9 +270,10 @@ def _decode_planes(body: bytes, colors: str, width: int, height: int) -> np.ndar
     return rgb
 
 
-def test_example_cells_match_route(client):
-    """Ogni cella e-paper è identica, pixel per pixel, ai piani che /route
-    restituisce con gli stessi parametri e la misura della cella."""
+def test_example_cells_match_the_route_composition_without_stable_options(client):
+    """Ogni cella e-paper è identica, pixel per pixel, ai piani di render_route_image()
+    con la misura della cella e senza chiave di percorso: /route aggiunge il riquadro a
+    larghezza fissa e la viewport ricordata, che /example non usa."""
     headers = {"X-Routefinder-Token": TOKEN}
     canvas = np.array(Image.open(io.BytesIO(client.get(EXAMPLE, headers=headers).content)).convert("RGB"))
     origin = main.parse_point(examples.ORIGIN, "origin")
@@ -254,9 +285,8 @@ def test_example_cells_match_route(client):
         if not isinstance(cell, tuple) or cell[0] == "rgb":
             continue
         colors, dither = cell
-        body = client.get(f"/route?origin={examples.ORIGIN}&destination={examples.DESTINATION}"
-                          f"&format=arduino&colors={colors}&dither={dither}&width={w}&height={h}",
-                          headers=headers).content
+        body = renderer.render_route_image(result, w, h, "arduino", colors, dither,
+                                           lambda v: Image.new("RGB", (v.width, v.height), (230, 230, 230)))
         x, y = grid.origin(index)
         assert (canvas[y:y + h, x:x + w] == _decode_planes(body, colors, w, h)).all(), cell
 

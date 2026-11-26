@@ -169,7 +169,14 @@ def compute_routes(
         # field mask): va nel log, non nella risposta al client.
         logger.warning("Routes API %d in %.0f ms: %s", response.status_code, elapsed_ms, response.text[:500])
         raise RoutesError(f"Routes API ha risposto {response.status_code}")
-    result = parse_response(response.json(), datetime.now(LOCAL_TZ))
+    try:
+        result = parse_response(response.json(), datetime.now(LOCAL_TZ))
+    except (ValueError, TypeError, AttributeError, KeyError, OverflowError) as exc:
+        # Un 200 con corpo che non è JSON o non ha la forma attesa vale come ogni
+        # altro guasto di Google: il corpo va nel log, il client riceve un 502.
+        logger.warning("Routes API 200 in %.0f ms con corpo non valido (%s): %s", elapsed_ms,
+                       type(exc).__name__, response.text[:500])
+        raise RoutesError("risposta della Routes API non valida") from exc
     logger.info("Routes API ok in %.0f ms: %d s, %d m, eco %s", elapsed_ms,
                 result.fastest.duration_s, result.fastest.distance_m,
                 "presente" if result.eco else "assente")
