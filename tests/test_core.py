@@ -299,6 +299,43 @@ def test_bayer_chunks_match_whole_image(size, monkeypatch):
         assert (dithering._quantize_bayer(image, palette) == _bayer_reference(image, palette)).all()
 
 
+def _pack_reference(mask):
+    """Impacchettamento bit per bit, MSB-first e righe completate con bit a 1: il
+    formato che i client embedded decodificano."""
+    h, w = mask.shape
+    stride = (w + 7) // 8
+    packed = bytearray(h * stride)
+    for y in range(h):
+        for x in range(stride * 8):
+            if x >= w or mask[y, x]:
+                packed[y * stride + x // 8] |= 0x80 >> (x % 8)
+    return bytes(packed)
+
+
+@pytest.mark.parametrize("width", [1, 7, 8, 9, 16, 61])
+def test_pack_mask_msb_matches_bit_loop(width):
+    mask = np.random.default_rng(width).random((5, width)) < 0.5
+    assert dithering.pack_mask_msb(mask) == _pack_reference(mask)
+
+
+@pytest.mark.parametrize("mode", ["L", "RGBA", "P"])
+def test_quantize_converts_other_modes_to_rgb(mode):
+    rgb = Image.fromarray(np.random.default_rng(3).integers(0, 256, (23, 37, 3), dtype=np.uint8))
+    other = rgb.convert(mode)
+    for dither in ("no", "floyd", "atkinson", "bayer"):
+        expected = dithering.quantize(other.convert("RGB"), "bwry", dither)
+        assert (dithering.quantize(other, "bwry", dither) == expected).all()
+
+
+def test_quantize_leaves_rgb_input_untouched():
+    # quantize() passa agli algoritmi l'immagine del chiamante senza copiarla.
+    image = Image.fromarray(np.random.default_rng(5).integers(0, 256, (23, 37, 3), dtype=np.uint8))
+    before = image.tobytes()
+    for dither in ("no", "floyd", "atkinson", "bayer"):
+        dithering.quantize(image, "bwry", dither)
+    assert image.tobytes() == before
+
+
 def test_example_measures_ram_once_per_size(monkeypatch):
     """La RAM di una cella dipende dalla misura, non dalla mappa: alla seconda
     griglia della stessa misura tracemalloc non riparte."""

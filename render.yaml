@@ -7,6 +7,8 @@ services:
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
     healthCheckPath: /health
+    # Deploy solo dopo che il workflow tests di GitHub Actions è passato sulla commit.
+    autoDeployTrigger: checksPass
     # La versione di Python la fissa .python-version, che render legge anche per
     # un servizio non creato da Blueprint.
     envVars:

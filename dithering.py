@@ -124,30 +124,36 @@ def _quantize_atkinson(img_rgb, palette_rgb):
     somma gli errori ricevuti nell'ordine della scansione riga per riga, quindi
     il risultato è identico bit per bit a quello del ciclo sui pixel, con una
     frazione del tempo e della RAM (niente liste annidate di float Python).
+    Un pixel dell'antidiagonale t legge solo gli errori delle antidiagonali da
+    t-4 a t-1, quindi l'errore si tiene per le ultime cinque e non per l'intera
+    immagine, che a qualche megapixel peserebbe più di 100 MB.
     """
-    base = np.asarray(img_rgb, dtype=np.float32)
+    base = np.asarray(img_rgb)
     h, w, _ = base.shape
     palette = np.array(palette_rgb, dtype=np.float64)
-    # Errore già diviso per 8 di ogni pixel, con due righe e due colonne vuote
-    # prima e una colonna dopo: i vicini fuori dall'immagine contribuiscono 0.
-    err = np.zeros((h + 2, w + 3, 3), dtype=np.float64)
+    # ring[t % 5][y + 2] è l'errore già diviso per 8 del pixel (y, t - 2y), con due righe
+    # vuote prima; un pixel fuori dall'immagine non viene mai scritto e contribuisce 0.
+    ring = np.zeros((5, h + 2, 3), dtype=np.float64)
     result = np.empty((h, w), dtype=np.uint8)
     for t in range(w + 2 * (h - 1)):
         ys = np.arange(max(0, (t - w + 2) // 2), min(h - 1, t // 2) + 1)
         xs = t - 2 * ys
-        ey, ex = ys + 2, xs + 2
+        ey = ys + 2
+        back1, back2, back3, back4 = (ring[(t - lag) % 5] for lag in (1, 2, 3, 4))
         p = base[ys, xs].astype(np.float64)
-        p = p + err[ey - 2, ex]
-        p = p + err[ey - 1, ex - 1]
-        p = p + err[ey - 1, ex]
-        p = p + err[ey - 1, ex + 1]
-        p = p + err[ey, ex - 2]
-        p = p + err[ey, ex - 1]
+        p = p + back4[ey - 2]  # (y-2, x)
+        p = p + back3[ey - 1]  # (y-1, x-1)
+        p = p + back2[ey - 1]  # (y-1, x)
+        p = p + back1[ey - 1]  # (y-1, x+1)
+        p = p + back2[ey]      # (y, x-2)
+        p = p + back1[ey]      # (y, x-1)
         diff = p[:, None, :] - palette[None, :, :]
         square = diff * diff
         idx = np.argmin(square[..., 0] + square[..., 1] + square[..., 2], axis=1)
         result[ys, xs] = idx
-        err[ey, ex] = (p - palette[idx]) * 0.125
+        current = ring[t % 5]
+        current.fill(0.0)
+        current[ey] = (p - palette[idx]) * 0.125
     return result
 
 
@@ -175,7 +181,9 @@ def quantize(img_rgb: Image.Image, color_mode: str, dither: str) -> np.ndarray:
     if dither not in _DISPATCH:
         raise ValueError(f"dither non valido: {dither!r}")
     palette = PALETTES[color_mode]
-    return _DISPATCH[dither](img_rgb.convert("RGB"), palette)
+    # convert() di Pillow copia anche un'immagine già RGB; nessun algoritmo modifica l'input.
+    rgb = img_rgb if img_rgb.mode == "RGB" else img_rgb.convert("RGB")
+    return _DISPATCH[dither](rgb, palette)
 
 
 def indices_to_rgb(indices: np.ndarray, color_mode: str) -> np.ndarray:
@@ -209,6 +217,7 @@ def pack_mask_msb(mask: np.ndarray) -> bytes:
 
     Righe paddate a multiplo di 8 pixel con bit=1 (compatibile con GxEPD2:
     bit=1 significa pixel NON appartenente al canale, cioè bianco/default).
+    Il padding è esplicito perchè np.packbits completerebbe l'ultimo byte con 0.
     """
     h, w = mask.shape
     pad_w = (w + 7) // 8 * 8
@@ -216,10 +225,7 @@ def pack_mask_msb(mask: np.ndarray) -> bytes:
         padded = np.ones((h, pad_w), dtype=bool)
         padded[:, :w] = mask
         mask = padded
-    reshaped = mask.reshape(h, pad_w // 8, 8)
-    weights = np.array([128, 64, 32, 16, 8, 4, 2, 1], dtype=np.uint8)
-    packed = (reshaped.astype(np.uint8) * weights).sum(axis=2).astype(np.uint8)
-    return packed.flatten().tobytes()
+    return np.packbits(mask, axis=1, bitorder="big").tobytes()
 
 
 def indices_to_channel_masks(indices: np.ndarray, color_mode: str) -> dict[str, np.ndarray]:

@@ -74,7 +74,7 @@ Le misure stanno in testa a `renderer.py` a `scale=1` e raddoppiano con `scale=2
 render.com free tier, regione Frankfurt, `uvicorn --workers 1`, come la webapp. `GOOGLE_MAPS_API_KEY` e `ROUTEFINDER_TOKEN` si impostano dal pannello di render (`sync: false` in `render.yaml`), mai nel repository. Senza `ROUTEFINDER_TOKEN` il servizio rifiuta ogni richiesta a `/route`. Le 750 ore-istanza gratuite al mese sono condivise con la webapp: il servizio si spegne dopo 15 minuti senza traffico in ingresso.
 
 - Il servizio su render è stato creato dalla dashboard e non come Blueprint, quindi `render.yaml` documenta la configurazione ma render non la applica: Build Command e Start Command vanno tenuti allineati a mano nella dashboard, e lo stesso vale per `MALLOC_MMAP_THRESHOLD_=262144`, che nella dashboard va impostata a mano.
-- Auto-Deploy su "After CI Checks Pass": render deploya una commit di `main` solo se il workflow `tests` di GitHub Actions è passato.
+- Auto-Deploy su "After CI Checks Pass" (`autoDeployTrigger: checksPass` in `render.yaml`, da impostare anche nella dashboard): render deploya una commit di `main` solo se il workflow `tests` di GitHub Actions è passato.
 - Il log di accesso di uvicorn non contiene il health check interno di render (`/health` riuscito da IP privato, ogni pochi secondi): lo scarta `RenderHealthCheckFilter` in `main.py`. Le richieste pubbliche, compreso un eventuale pre-warm dei client, arrivano dal proxy con l'IP reale di `X-Forwarded-For` e restano nel log, come un health check fallito.
 - Dopo `/auth` senza destinazione si torna a `/docs` (`auth.DEFAULT_NEXT`): `/route` senza parametri risponde 400 e `/example` chiama Google.
 
