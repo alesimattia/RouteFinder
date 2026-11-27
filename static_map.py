@@ -14,7 +14,7 @@ from typing import Optional
 import requests
 from PIL import Image
 
-from map_fit import Viewport
+from map_fit import ZOOM_STEPS, Viewport
 
 
 logger = logging.getLogger("routefinder.map")
@@ -55,17 +55,29 @@ def scale_for(width: int, height: int) -> int:
     raise ValueError(f"misura oltre {MAX_SIDE} px per lato")
 
 
+def request_size(viewport: Viewport) -> tuple[int, int, int]:
+    """
+    Scale e size della richiesta. A zoom intero sono quelli della viewport; con i
+    passi frazionari la mappa si chiede a scale=2 e a una size che, ridotta di
+    2/ingrandimento, copre esattamente la viewport: la viewport frazionaria ha lati
+    entro MAX_SIZE, quindi la size resta entro il limite.
+    """
+    if viewport.zoom_steps == 0:
+        return viewport.scale, math.ceil(viewport.width / viewport.scale), math.ceil(viewport.height / viewport.scale)
+    return (MAX_SCALE, math.ceil(viewport.width / viewport.magnification),
+            math.ceil(viewport.height / viewport.magnification))
+
+
 def build_params(viewport: Viewport, api_key: str) -> list[tuple[str, str]]:
     """Parametri della richiesta; lista di coppie perchè style si ripete. La
     base è nei colori di Google per ogni formato: la palette e-paper la
     applica il renderer."""
-    size_w = math.ceil(viewport.width / viewport.scale)
-    size_h = math.ceil(viewport.height / viewport.scale)
+    scale, size_w, size_h = request_size(viewport)
     params = [
         ("center", f"{viewport.center_lat:.6f},{viewport.center_lng:.6f}"),
         ("zoom", str(viewport.zoom)),
         ("size", f"{size_w}x{size_h}"),
-        ("scale", str(viewport.scale)),
+        ("scale", str(scale)),
         ("maptype", "roadmap"),
         ("format", "png32"),
         ("language", "it"),
@@ -83,7 +95,10 @@ def fetch_base_map(viewport: Viewport, api_key: str,
     porta alla misura esatta.
 
     Con scale=2 e una misura dispari la Static API restituisce un pixel in più:
-    si toglie a destra e in basso, e il logo in basso a sinistra resta intero.
+    si toglie a destra e in basso, così il logo in basso a sinistra resta intero
+    e il centro della mappa cade su map_fit.image_anchor(). Con i passi
+    frazionari la mappa a scale=2 si riduce alla misura della viewport con un box
+    centrato sul centro della mappa, che cade così a metà della misura.
     """
     http = session or requests
     started = time.monotonic()
@@ -96,7 +111,15 @@ def fetch_base_map(viewport: Viewport, api_key: str,
         logger.warning("Static API %d in %.0f ms: %s", response.status_code, elapsed_ms, response.text[:300])
         raise StaticMapError(f"Static API ha risposto {response.status_code}")
     image = Image.open(io.BytesIO(response.content)).convert("RGB")
-    logger.info("Static API ok in %.0f ms: %dx%d zoom %d", elapsed_ms, image.width, image.height, viewport.zoom)
-    if image.width < viewport.width or image.height < viewport.height:
+    logger.info("Static API ok in %.0f ms: %dx%d zoom %d+%d/%d", elapsed_ms, image.width, image.height,
+                viewport.zoom, viewport.zoom_steps, ZOOM_STEPS)
+    scale, size_w, size_h = request_size(viewport)
+    if image.width < size_w * scale or image.height < size_h * scale:
         raise StaticMapError(f"immagine {image.width}x{image.height} più piccola del richiesto")
-    return image.crop((0, 0, viewport.width, viewport.height))
+    if viewport.zoom_steps == 0:
+        return image.crop((0, 0, viewport.width, viewport.height))
+    shrink = MAX_SCALE / viewport.magnification
+    half_w, half_h = viewport.width * shrink / 2, viewport.height * shrink / 2
+    center_x, center_y = size_w * scale / 2, size_h * scale / 2
+    return image.resize((viewport.width, viewport.height), Image.LANCZOS,
+                        box=(center_x - half_w, center_y - half_h, center_x + half_w, center_y + half_h))

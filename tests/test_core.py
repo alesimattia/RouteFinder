@@ -3,13 +3,16 @@ formato arduino e testo del riquadro."""
 
 from __future__ import annotations
 
+import io
 import json
+import math
 from datetime import datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 import dithering
 import examples
@@ -103,15 +106,31 @@ def test_fit_returns_admissible_prefer_unchanged(scale, width, height):
 
 
 def test_fit_keeps_prefer_that_the_plain_search_would_not_choose():
-    """Con uno zoom basso il tracciato è un punto: ogni traslazione ammissibile vale, e
-    `prefer` vince anche se la ricerca normale sceglierebbe un'altra viewport."""
+    """Allo zoom della ricerca il tracciato corto è quasi un punto: ogni traslazione
+    ammissibile vale, e `prefer` vince anche se la ricerca normale sceglierebbe
+    un altro centro."""
     path = _diagonal(start=(43.600, 13.500), end=(43.602, 13.503))
     kwargs = dict(margin=6, padding=6, max_zoom=14)
     plain = fit_viewport([path], [], 600, 300, [], **kwargs)
     assert plain.zoom == 14
-    for prefer in (_shifted(plain, 40, -25), _shifted(plain, -90, 30, zoom=13)):
-        kept = fit_viewport([path], [], 600, 300, [], **kwargs, prefer=prefer)
-        assert kept == prefer and kept != plain
+    prefer = _shifted(plain, 40, -25)
+    kept = fit_viewport([path], [], 600, 300, [], **kwargs, prefer=prefer)
+    assert kept == prefer and kept != plain
+
+
+def test_fit_prefer_at_a_lower_scale_gives_way_to_the_higher_one():
+    """Una viewport ricordata a uno zoom o a un passo frazionario più bassi non trattiene
+    la scala: la ricerca risale appena il tracciato entra più grande."""
+    path = _diagonal(start=(43.600, 13.500), end=(43.602, 13.503))
+    kwargs = dict(margin=6, padding=6, max_zoom=14)
+    plain = fit_viewport([path], [], 600, 300, [], **kwargs)
+    assert fit_viewport([path], [], 600, 300, [], **kwargs, prefer=_shifted(plain, -90, 30, zoom=13)) == plain
+    fractional = fit_viewport([path], [], 600, 300, [], **kwargs, fractional=True)
+    assert fractional.zoom_steps > 0
+    lower = Viewport(fractional.center_lat, fractional.center_lng, fractional.zoom, 600, 300, 1,
+                     fractional.zoom_steps - 1)
+    assert fit_viewport([path], [], 600, 300, [], **kwargs, fractional=True, prefer=lower) == fractional
+    assert fit_viewport([path], [], 600, 300, [], **kwargs, fractional=True, prefer=fractional) == fractional
 
 
 def test_fit_recomputes_when_prefer_is_not_admissible():
@@ -236,12 +255,29 @@ def test_compute_routes_parses_a_valid_200_body():
     assert result.fastest.duration_s == 1500
 
 
+def test_build_request_without_eco_asks_only_the_fastest_route():
+    """Senza eco niente rotta di riferimento nè consumi; la preferenza resta quella col
+    traffico, nello stesso SKU."""
+    with_eco = routes_api.build_request((43.6, 13.5), (43.5, 13.3), "diesel")
+    fastest_only = routes_api.build_request((43.6, 13.5), (43.5, 13.3), "diesel", eco=False)
+    assert with_eco["requestedReferenceRoutes"] == ["FUEL_EFFICIENT"]
+    assert "requestedReferenceRoutes" not in fastest_only and "extraComputations" not in fastest_only
+    assert fastest_only["routingPreference"] == with_eco["routingPreference"] == "TRAFFIC_AWARE_OPTIMAL"
+
+
 def test_card_rows_text_is_ascii_and_complete():
     rows = renderer.card_rows(routes_api.parse_response(_route_payload(), NOW))
-    texts = [r.text for r in rows]
-    assert texts == ["25 min", "+5 min", "18,4 km", "+3 min -0,4 L", "agg. 07:42"]
-    assert rows[1].color == "red"
-    assert all(" " <= c <= "~" for t in texts for c in t)
+    texts = [[item.text if item else None for item in (row.left, row.right)] for row in rows]
+    assert texts == [["25 min", "agg. 07:42"], ["+5 min", "18,4 km"], ["+3 min -0,4 L", None]]
+    assert rows[1].left.color == "red"
+    assert all(" " <= c <= "~" for row in rows for item in row.items() for c in item.text)
+
+
+def test_card_rows_keep_the_distance_in_its_column_without_delay():
+    payload = _route_payload()
+    del payload["routes"][0]["staticDuration"]
+    rows = renderer.card_rows(routes_api.parse_response(payload, NOW))
+    assert rows[1].left is None and rows[1].right.text == "18,4 km"
 
 
 def _card_width(duration_s=1500, with_delay=True, with_eco=True, computed_at=NOW, stable=True) -> int:
@@ -258,33 +294,41 @@ def _card_width(duration_s=1500, with_delay=True, with_eco=True, computed_at=NOW
 
 def test_stable_card_width_is_fixed_for_routes_under_one_hour():
     """Con le avanzate dei glifi e i testi di riserva la larghezza non dipende da
-    durata ("35 min", "41 min"), ora di calcolo, riga ritardo o riga eco: 187 px a scale=1."""
+    durata ("35 min", "41 min"), ora di calcolo, ritardo o riga eco: 259 px a scale=1."""
     times = (NOW, NOW.replace(hour=11, minute=59), NOW.replace(hour=7, minute=15))
     widths = {_card_width(duration_s, with_delay, with_eco, computed_at)
               for duration_s in (2100, 2460, 600)
               for with_delay in (True, False)
               for with_eco in (True, False)
               for computed_at in times}
-    assert widths == {187}
+    assert widths == {259}
 
 
 def test_stable_card_width_grows_for_text_wider_than_the_reserve():
     """Un tragitto di un'ora o più ("1 h 05 min") è più largo della riserva "59 min"."""
-    assert _card_width(duration_s=3900) > 187
+    assert _card_width(duration_s=3900) > 259
 
 
 def test_card_width_without_stable_follows_the_real_text():
-    """Senza `stable` (/example) il riquadro è largo quanto l'inchiostro del testo reale."""
-    assert _card_width(stable=False) == 170
-    assert _card_width(with_eco=False, stable=False) == 137
+    """Senza `stable` (/example) la colonna sinistra misura l'inchiostro del testo reale
+    e la destra l'avanzata, che la allinea; la riga eco qui non allarga il riquadro."""
+    assert _card_width(stable=False) == 255
+    assert _card_width(with_eco=False, stable=False) == 255
+
+
+def test_card_height_follows_the_rows():
+    """Due righe sul pannello, tre con la riga eco: 64 e 88 px a scale=1."""
+    for with_eco, height in ((False, 64), (True, 88)):
+        result = routes_api.parse_response(_route_payload(same_eco=not with_eco), NOW)
+        assert renderer.card_size(renderer.card_rows(result), stable=True)[1] == height
 
 
 def test_card_reserve_texts_fit_inside_their_row_advance():
     """L'inchiostro di ogni testo, reale o di riserva, sta dentro l'avanzata che dimensiona
     il riquadro, quindi il padding destro non viene mai eroso."""
     rows = renderer.card_rows(routes_api.parse_response(_route_payload(), NOW))
-    samples = [(kind.font, kind.reserve_text) for kind in renderer.CARD_ROW_KINDS]
-    samples += [(row.font, row.text) for row in rows]
+    samples = [(kind.font, kind.reserve_text) for kind in renderer.CARD_ITEM_KINDS]
+    samples += [(item.font, item.text) for row in rows for item in row.items()]
     for font_name, text in samples:
         font = gfx_font.load(font_name)
         x1, _, w, _ = font.text_bounds(text)
@@ -296,8 +340,25 @@ def test_draw_card_has_the_measured_size():
     rows = renderer.card_rows(result)
     _, colors = renderer._color_table("bwr")
     assert renderer.draw_card(rows, colors, "P").size == renderer.card_size(rows)
-    stable_size = renderer.card_size(rows, stable=True)
-    assert renderer.draw_card(rows, colors, "P", stable_size[0]).size == stable_size
+    assert renderer.draw_card(rows, colors, "P", stable=True).size == renderer.card_size(rows, stable=True)
+
+
+def test_right_column_icons_share_the_same_x():
+    """Ora e distanza stanno in una colonna: l'inchiostro delle loro icone comincia dove
+    lo mette la colonna destra, quindi le due icone partono dallo stesso x."""
+    rows = renderer.card_rows(routes_api.parse_response(_route_payload(), NOW))
+    _, colors = renderer._color_table("bwr")
+    card = np.array(renderer.draw_card(rows, colors, "P", stable=True))
+    right_x = renderer._card_geometry(rows, stable=True).right_x
+    y = renderer.CARD_PADDING
+    for row in rows[:2]:
+        height = renderer._row_height(row)
+        side = renderer._icon_side(gfx_font.load(row.right.font))
+        first_ink = material_icons.mask(row.right.icon, side).getbbox()[0]
+        band = card[y:y + height, right_x - 3:]
+        columns = np.flatnonzero((band != colors["white"]).any(axis=0))
+        assert int(columns[0]) + right_x - 3 == right_x + first_ink, row.right.icon
+        y += height + renderer.CARD_ROW_GAP
 
 
 def _noisy_map(viewport: Viewport) -> Image.Image:
@@ -354,17 +415,25 @@ def test_route_layout_reuses_the_viewport_of_the_same_route_and_size(monkeypatch
     assert preferred[2:] == [None, None, None]
 
 
-def test_route_layout_keeps_the_remembered_viewport_when_the_card_shrinks():
+def test_route_layout_remembered_viewport_gives_way_to_a_higher_scale():
     """Senza la rotta eco il riquadro è più basso e il tracciato un sottoinsieme del
-    precedente: la viewport ricordata resta ammissibile e non si sposta, mentre un fit
-    da zero la porterebbe altrove."""
-    key = ((43.6158, 13.5189), (43.5, 13.3), "gasoline")
+    precedente: la scala ammissibile sale e la viewport ricordata, pur ammissibile,
+    cede il posto al fit da zero."""
+    key = ((43.6158, 13.5189), (43.5, 13.3), "gasoline", True)
     with_eco = routes_api.parse_response(_route_payload(), NOW)
     without_eco = routes_api.parse_response(_route_payload(same_eco=True), NOW)
     first = renderer.route_layout(with_eco, 600, 300, key).viewport
-    fresh = renderer.route_layout(without_eco, 600, 300).viewport
-    assert fresh != first
-    assert renderer.route_layout(without_eco, 600, 300, key).viewport == first
+    climbed = renderer.route_layout(without_eco, 600, 300, key).viewport
+    assert (climbed.zoom, climbed.zoom_steps) > (first.zoom, first.zoom_steps)
+    assert climbed == renderer.route_layout(without_eco, 600, 300, ("altra chiave",)).viewport
+
+
+def test_route_layout_is_fractional_only_up_to_the_static_size_limit():
+    """Fino a 640 px per lato la mappa ridotta da scale=2 dà i passi frazionari; oltre,
+    la Static API è già a scale=2 e lo zoom resta intero."""
+    result = routes_api.parse_response(_route_payload(), NOW)
+    assert renderer.route_layout(result, 600, 300).viewport.zoom_steps > 0
+    assert renderer.route_layout(result, 1200, 600).viewport.zoom_steps == 0
 
 
 def test_formatting():
@@ -404,6 +473,93 @@ def test_static_map_keeps_google_colors():
     viewport = Viewport(43.6, 13.5, 11, 600, 300, 1)
     styles = [v for k, v in static_map.build_params(viewport, "k") if k == "style"]
     assert styles == list(static_map.STYLE_CONTENT)
+
+
+class _FakeMapSession:
+    """Static API finta: restituisce sempre la stessa PNG e ricorda i parametri."""
+
+    def __init__(self, image: Image.Image):
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        self.png = buffer.getvalue()
+        self.params = None
+
+    def get(self, url, params=None, timeout=None):
+        self.params = dict(params)
+        return SimpleNamespace(status_code=200, headers={"Content-Type": "image/png"}, content=self.png, text="")
+
+
+def _dark_centroid(image: Image.Image) -> tuple[float, float]:
+    """Baricentro dei pixel scuri in coordinate di bordo, pesato per quanto sono scuri."""
+    darkness = 255.0 - np.array(image.convert("L"), dtype=np.float64)
+    darkness[darkness < 8] = 0
+    ys, xs = np.mgrid[0:darkness.shape[0], 0:darkness.shape[1]]
+    total = darkness.sum()
+    return float((xs * darkness).sum() / total) + 0.5, float((ys * darkness).sum() / total) + 0.5
+
+
+def test_odd_size_at_scale_two_keeps_the_map_center_on_the_projection():
+    """A scale=2 con una misura dispari la Static API restituisce un pixel in più, tolto a
+    destra e in basso: il centro della mappa deve cadere dove Viewport.project() mette
+    il centro, senza il mezzo pixel di scarto."""
+    viewport = Viewport(43.6, 13.5, 13, 1201, 801, 2)
+    scale, size_w, size_h = static_map.request_size(viewport)
+    full_w, full_h = size_w * scale, size_h * scale
+    raw = Image.new("RGB", (full_w, full_h), (255, 255, 255))
+    ImageDraw.Draw(raw).rectangle((full_w // 2 - 1, full_h // 2 - 1, full_w // 2, full_h // 2), fill=(0, 0, 0))
+    base = static_map.fetch_base_map(viewport, "k", session=_FakeMapSession(raw))
+    assert base.size == (1201, 801)
+    x, y = viewport.project(43.6, 13.5)
+    mark_x, mark_y = _dark_centroid(base)
+    assert abs(mark_x - x) < 0.25 and abs(mark_y - y) < 0.25
+
+
+def test_fractional_request_is_scale_two_within_the_size_limit():
+    viewport = Viewport(43.6, 13.5, 13, 610, 440, 1, zoom_steps=1)
+    params = dict(static_map.build_params(viewport, "k"))
+    size_w, size_h = (int(v) for v in params["size"].split("x"))
+    assert params["zoom"] == "13" and params["scale"] == "2"
+    assert size_w <= static_map.MAX_SIZE and size_h <= static_map.MAX_SIZE
+    assert (size_w, size_h) == (math.ceil(610 / viewport.magnification), math.ceil(440 / viewport.magnification))
+
+
+@pytest.mark.parametrize("steps", [1, 16, 31])
+def test_fractional_map_is_shrunk_around_the_map_center(steps):
+    """La mappa a scale=2 ridotta alla viewport frazionaria mette un punto noto dove lo
+    mette Viewport.project(): il tracciato disegnato sopra segue le strade."""
+    viewport = Viewport(43.6, 13.5, 13, 610, 440, 1, zoom_steps=steps)
+    scale, size_w, size_h = static_map.request_size(viewport)
+    native = Viewport(43.6, 13.5, 13, size_w * scale, size_h * scale, scale)
+    point = (43.6 - 0.004, 13.5 + 0.011)
+    px, py = native.project(*point)
+    raw = Image.new("RGB", (size_w * scale, size_h * scale), (255, 255, 255))
+    ImageDraw.Draw(raw).ellipse((px - 4, py - 4, px + 4, py + 4), fill=(0, 0, 0))
+    base = static_map.fetch_base_map(viewport, "k", session=_FakeMapSession(raw))
+    assert base.size == (610, 440)
+    expected_x, expected_y = viewport.project(*point)
+    mark_x, mark_y = _dark_centroid(base)
+    assert abs(mark_x - expected_x) < 1 and abs(mark_y - expected_y) < 1
+
+
+def test_fractional_fit_adds_steps_and_keeps_the_route_inside():
+    """Il fit frazionario parte dallo zoom intero e aggiunge passi finchè il tracciato,
+    più grande, resta dentro l'immagine e fuori dalle zone, che crescono con lui."""
+    path = _diagonal()
+    width, height = 600, 300
+    card = Rect(width - 200, 6, width - 6, 140)
+
+    def zones(magnification):
+        return [card, Rect(0, height - round(28 * magnification), round(72 * magnification), height - 1)]
+
+    integer = fit_viewport([path], [], width, height, zones, margin=6, padding=6)
+    fractional = fit_viewport([path], [], width, height, zones, margin=6, padding=6, fractional=True)
+    assert integer.zoom_steps == 0
+    assert fractional.zoom == integer.zoom and fractional.zoom_steps > 0
+    for x, y in _drawn_pixels(fractional, path):
+        assert 0 <= x < width and 0 <= y < height
+        for rect in zones(fractional.magnification):
+            r = rect.expanded(6)
+            assert not (r.x0 + 1 < x < r.x1 - 1 and r.y0 + 1 < y < r.y1 - 1)
 
 
 def test_jpeg_render_and_scale_two():
@@ -568,21 +724,25 @@ def test_example_measures_ram_once_per_size(monkeypatch):
 
 def test_example_threshold_at_16_9_follows_the_real_text_width():
     """/example non usa il riquadro a larghezza fissa: a 16:9 con il riquadro completo
-    (eco e ritardo, 170 px di testo reale) la soglia è 1223x688."""
+    (eco e ritardo, 255x88 di testo reale) la soglia è 1180x664."""
     result = routes_api.parse_response(_route_payload(), NOW)
-    for canvas in [(1223, 688), (1225, 689), (1280, 720)]:
+    for canvas in [(1180, 664), (1182, 665), (1280, 720)]:
         examples.grid_for(result, *canvas)
-    for canvas in [(1222, 687), (1200, 675)]:
+    for canvas in [(1179, 663), (1100, 619)]:
         with pytest.raises(ValueError):
             examples.grid_for(result, *canvas)
-    # Senza la riga eco il riquadro è più stretto e la soglia scende.
-    examples.grid_for(routes_api.parse_response(_route_payload(same_eco=True), NOW), 1200, 675)
+    # Senza la riga eco il riquadro è più basso e la soglia scende.
+    without_eco = routes_api.parse_response(_route_payload(same_eco=True), NOW)
+    examples.grid_for(without_eco, 1080, 608)
+    with pytest.raises(ValueError):
+        examples.grid_for(without_eco, 1079, 607)
 
 
-@pytest.mark.parametrize("canvas,landscape", [((1920, 1200), True), ((1100, 1000), True), ((900, 1400), False)])
+@pytest.mark.parametrize("canvas,landscape", [((1920, 1200), True), ((1100, 1000), True), ((1200, 1800), False)])
 def test_example_grid_cells_resemble_the_canvas(canvas, landscape):
     """Le celle hanno l'orientazione della tela: larghe in una finestra orizzontale,
-    alte in una verticale, senza proporzioni fisse imposte dal codice."""
+    alte in una verticale, senza proporzioni fisse imposte dal codice. In verticale
+    serve una tela larga abbastanza per quattro colonne di riquadri."""
     result = routes_api.parse_response(_route_payload(), NOW)
     grid = examples.grid_for(result, *canvas)
     assert (grid.cell_w > grid.cell_h) == landscape

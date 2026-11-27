@@ -126,22 +126,26 @@ def parse_response(payload: dict, computed_at: datetime) -> RouteResult:
     return RouteResult(fastest=fastest, eco=eco, computed_at=computed_at)
 
 
-def build_request(origin: tuple[float, float], destination: tuple[float, float], fuel: str) -> dict:
-    """Corpo JSON di computeRoutes per una coppia di punti e un carburante."""
+def build_request(origin: tuple[float, float], destination: tuple[float, float], fuel: str,
+                  eco: bool = True) -> dict:
+    """Corpo JSON di computeRoutes per una coppia di punti e un carburante. Senza
+    `eco` si chiede la sola rotta più veloce: la risposta ha una rotta sola."""
     def waypoint(point: tuple[float, float]) -> dict:
         return {"location": {"latLng": {"latitude": point[0], "longitude": point[1]}}}
 
-    return {
+    body = {
         "origin": waypoint(origin),
         "destination": waypoint(destination),
         "travelMode": "DRIVE",
         "routingPreference": "TRAFFIC_AWARE_OPTIMAL",
-        "requestedReferenceRoutes": ["FUEL_EFFICIENT"],
-        "extraComputations": ["FUEL_CONSUMPTION"],
         "routeModifiers": {"vehicleInfo": {"emissionType": FUEL_TO_EMISSION_TYPE[fuel]}},
         "languageCode": "it",
         "units": "METRIC",
     }
+    if eco:
+        body["requestedReferenceRoutes"] = ["FUEL_EFFICIENT"]
+        body["extraComputations"] = ["FUEL_CONSUMPTION"]
+    return body
 
 
 def compute_routes(
@@ -150,14 +154,16 @@ def compute_routes(
     fuel: str,
     api_key: str,
     session: Optional[requests.Session] = None,
+    eco: bool = True,
 ) -> RouteResult:
-    """Chiama computeRoutes e restituisce il risultato; RoutesError su ogni guasto."""
+    """Chiama computeRoutes e restituisce il risultato; RoutesError su ogni guasto.
+    `eco` è quello di build_request()."""
     http = session or requests
     started = time.monotonic()
     try:
         response = http.post(
             ENDPOINT,
-            json=build_request(origin, destination, fuel),
+            json=build_request(origin, destination, fuel, eco),
             headers={"X-Goog-Api-Key": api_key, "X-Goog-FieldMask": FIELD_MASK},
             timeout=REQUEST_TIMEOUT_S,
         )
@@ -179,5 +185,5 @@ def compute_routes(
         raise RoutesError("risposta della Routes API non valida") from exc
     logger.info("Routes API ok in %.0f ms: %d s, %d m, eco %s", elapsed_ms,
                 result.fastest.duration_s, result.fastest.distance_m,
-                "presente" if result.eco else "assente")
+                "non richiesta" if not eco else "presente" if result.eco else "assente")
     return result

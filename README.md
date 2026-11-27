@@ -2,7 +2,7 @@
 
 Servizio FastAPI che calcola il percorso più veloce in auto, col traffico, fra due punti e lo restituisce come immagine: JPEG a colori pieni per il browser, oppure piani 1bpp pronti per display e-paper a pochi colori (`bw`, `bwr`, `bwry`), che un client embedded legge direttamente nel buffer del display. Misura, palette e dither si scelgono dalla querystring.
 
-L'immagine è una mappa Google con il tracciato più veloce in rosso, l'alternativa a minor consumo per il carburante scelto in nero tratteggiato (solo se diversa), i simboli di partenza e arrivo e, in alto a destra, un riquadro con tempo stimato, ritardo dovuto al traffico, distanza, risparmio dell'alternativa eco e ora del calcolo. Testo e icone usano FreeSans di Adafruit GFX e Material Symbols Rounded, e il tracciato non passa mai sotto il riquadro nè sopra logo e attribuzione Google. Su `/route` il riquadro ha larghezza fissa (187 px a `scale=1`, calcolata sui testi più larghi possibili e non su quello del momento) e il servizio ricorda per qualche ora la viewport scelta per un percorso e una misura, finchè resta ammissibile: due richieste dello stesso percorso danno così la stessa mappa e cambiano solo i valori del riquadro. `/example` non lo fa e usa il riquadro del testo reale.
+L'immagine è una mappa Google con il tracciato più veloce in rosso, l'alternativa a minor consumo per il carburante scelto in nero tratteggiato (solo se diversa), i simboli di partenza e arrivo e, in alto a destra, un riquadro basso e largo su due colonne: tempo stimato e ora del calcolo, ritardo dovuto al traffico e distanza, poi il risparmio dell'alternativa eco. Con `eco=false` c'è solo il tracciato più veloce. Testo e icone usano FreeSans di Adafruit GFX e Material Symbols Rounded, e il tracciato non passa mai sotto il riquadro nè sopra logo e attribuzione Google. Fino a 640 px per lato lo zoom della mappa è frazionario, a passi di 1/32 di ottava, così il tracciato riempie lo spazio libero invece di dimezzarsi al livello intero inferiore. Su `/route` il riquadro ha larghezza fissa (259 px a `scale=1`, calcolata sui testi più larghi possibili e non su quello del momento) e il servizio ricorda per qualche ora la viewport scelta per un percorso e una misura, finchè ha ancora la scala più alta ammissibile: due richieste dello stesso percorso danno così la stessa mappa e cambiano solo i valori del riquadro. `/example` non lo fa e usa il riquadro del testo reale.
 
 ## Endpoint
 
@@ -19,7 +19,8 @@ Parametri di `/route`:
 | Parametro | Default | Valori |
 |---|---|---|
 | `origin`, `destination` | obbligatori | `lat,lng` in gradi decimali |
-| `fuel` | `gasoline` | `gasoline`, `diesel`, `hybrid`, `electric` |
+| `fuel` | `gasoline` | `gasoline`, `diesel`, `hybrid`, `electric`; conta solo per l'alternativa eco |
+| `eco` | `true` | `true` con l'alternativa a minor consumo se diversa, `false` per il solo percorso più veloce |
 | `width`, `height` | la misura massima | da 64 a 1280 px per lato |
 | `format` | `jpg` | `jpg` (qualità 80), `arduino` |
 | `colors` | `bwr` con `arduino`; nessuno con `jpg`, a colori pieni | `bw`, `bwr`, `bwry` |
@@ -27,7 +28,7 @@ Parametri di `/route`:
 
 Con `format=arduino` il corpo sono i soli piani concatenati, MSB-first, bit a 1 = pixel non di quel colore, nello stesso formato di `/cinema/arduino` della webapp: `Content-Length = piani * ceil(width/8) * height`, per esempio 30000 byte a 400x300 `bwr` (2 piani da 50 byte per 300 righe) e 22800 byte a 301x200 `bwry` (3 piani da 38 byte per 200 righe). Nessuna compressione su questo percorso e nessun clamp della misura: un client embedded confronta il `Content-Length` esatto, e una misura fuori da 64..1280 px per lato dà 400. Con `format=jpg` senza `colors` l'immagine è a colori pieni, con la mappa nei colori di Google. Con `colors` il JPEG è l'anteprima e-paper: la stessa mappa a colori convertita nella palette come per `arduino`, a soglia se manca `dither`. Un `dither` senza `colors` rimanda con un 307 allo stesso URL con `colors=bwr` aggiunto, così la palette applicata resta visibile nella barra degli indirizzi.
 
-`/example` disegna un percorso fisso, `ORIGIN` e `DESTINATION` in testa a `examples.py`, e accetta solo `fuel`, `width` e `height`. Restituisce un'unica PNG grande quanto la viewport del browser: aperto senza `width` e `height`, il browser riceve una pagina che rilegge lo stesso URL con le misure della finestra in pixel CSS; da curl o con `width` e `height` vale la misura indicata, di default 1920x1080, al massimo 2560x1600. Dentro ci sono la cella a colori pieni, `bw` con dither `floyd` e `bayer`, `bwr` e `bwry` con dither `no`, `floyd` e `bayer`, una cella `bwry` con `atkinson` e un riepilogo, in celle piccole quanto basta a stare nella finestra: il numero di colonne si sceglie perchè le celle somiglino alla finestra, e sotto 1223x688 a 16:9 il riquadro informativo non entra più e la risposta è un 400 (la soglia cambia con la forma della finestra). Sotto ogni cella ci sono il suffisso dell'URL `/route` che la riproduce, tempo e RAM di generazione e il peso del corpo di `/route` a 1280x1280 (esatto per `arduino`, stimato per il JPEG). Ogni richiesta fa una chiamata alla Routes API (nessuna se il percorso è in cache) e una alla Static API: la base a colori, che ogni cella converte nella sua palette.
+`/example` disegna un percorso fisso, `ORIGIN` e `DESTINATION` in testa a `examples.py`, e accetta solo `fuel`, `width` e `height`. Restituisce un'unica PNG grande quanto la viewport del browser: aperto senza `width` e `height`, il browser riceve una pagina che rilegge lo stesso URL con le misure della finestra in pixel CSS; da curl o con `width` e `height` vale la misura indicata, di default 1920x1080, al massimo 2560x1600. Dentro ci sono la cella a colori pieni, `bw` con dither `floyd` e `bayer`, `bwr` e `bwry` con dither `no`, `floyd` e `bayer`, una cella `bwry` con `atkinson` e un riepilogo, in celle piccole quanto basta a stare nella finestra: il numero di colonne si sceglie perchè le celle somiglino alla finestra, e sotto 1180x664 a 16:9 il riquadro informativo non entra più e la risposta è un 400 (la soglia cambia con la forma della finestra). Sotto ogni cella ci sono il suffisso dell'URL `/route` che la riproduce, tempo e RAM di generazione e il peso del corpo di `/route` a 1280x1280 (esatto per `arduino`, stimato per il JPEG). Ogni richiesta fa una chiamata alla Routes API (nessuna se il percorso è in cache) e una alla Static API: la base a colori, che ogni cella converte nella sua palette.
 
 ## Autenticazione
 
@@ -41,7 +42,7 @@ Render.com, free tier, come la webapp cinema (`render.yaml`). Variabili da impos
 - `ROUTEFINDER_TOKEN`: stringa casuale lunga, la stessa che si configura nei client.
 - `MALLOC_MMAP_THRESHOLD_`: `262144`, non segreta. Soglia fissa di mmap di glibc: su Linux, con più thread, l'allocatore trattiene molta più memoria di quella che serve (misurato sulla webapp cinema, stesso stack numpy e Pillow), e su render free ci sono 512 MB.
 
-Costi: la preferenza `TRAFFIC_AWARE_OPTIMAL`, l'unica che ammette la rotta eco, porta ogni richiesta nello SKU Compute Routes Pro (5 000 chiamate gratuite al mese); la Static API sta in Essentials (10 000). Ogni richiesta a `/route` fa una chiamata a ciascuna delle due API, quindi la soglia gratuita da 5 000 chiamate al mese regge circa 160 richieste al giorno. Le risposte restano in cache 60 secondi, così un refresh del browser non paga una seconda chiamata, mentre un client che interroga a distanza di qualche minuto va sempre in miss e porta il traffico aggiornato. Di una cartografia non si conserva nulla: resta in memoria per ore solo la viewport (centro e zoom).
+Costi: la preferenza `TRAFFIC_AWARE_OPTIMAL`, l'unica che ammette la rotta eco, porta ogni richiesta nello SKU Compute Routes Pro (5 000 chiamate gratuite al mese); la Static API sta in Essentials (10 000). Ogni richiesta a `/route` fa una chiamata a ciascuna delle due API, quindi la soglia gratuita da 5 000 chiamate al mese regge circa 160 richieste al giorno. Le risposte restano in cache 60 secondi, così un refresh del browser non paga una seconda chiamata, mentre un client che interroga a distanza di qualche minuto va sempre in miss e porta il traffico aggiornato. Di una cartografia non si conserva nulla: resta in memoria per ore solo la viewport (centro, zoom e passi frazionari). Con `eco=false` la preferenza resta `TRAFFIC_AWARE_OPTIMAL`, quindi lo SKU non cambia.
 
 ## Sviluppo
 
@@ -60,8 +61,8 @@ I test sostituiscono le API Google con fixture, quindi girano senza chiave.
 | `auth.py` | token, cookie, pagina di accesso |
 | `routes_api.py` | `computeRoutes` con field mask minimo, parsing della risposta |
 | `polyline.py` | decodifica dell'encoded polyline |
-| `map_fit.py` | proiezione Web Mercator, scelta di zoom e centro con il tracciato fuori dalle zone vietate |
-| `static_map.py` | base cartografica dalla Static API, nei colori di Google per ogni formato |
+| `map_fit.py` | proiezione Web Mercator, scelta di zoom, passi frazionari e centro con il tracciato fuori dalle zone vietate |
+| `static_map.py` | base cartografica dalla Static API, nei colori di Google per ogni formato; ridotta da `scale=2` per lo zoom frazionario |
 | `renderer.py` | composizione di base, tracciati, simboli e riquadro |
 | `examples.py` | griglia di `/example` con le misure di ogni cella |
 | `gfx_font.py`, `material_icons.py` | testo e icone a 1 bit |
@@ -69,7 +70,7 @@ I test sostituiscono le API Google con fixture, quindi girano senza chiave.
 
 ## Termini d'uso Google
 
-Logo e attribuzione Google restano nella misura nativa in basso, non coperti, e i risultati della Routes API si mostrano solo su mappa Google, come chiedono i termini di Google Maps Platform. Con un account di fatturazione nello Spazio Economico Europeo non si possono mostrare descrizione e passi del percorso accanto alla mappa: il riquadro non li contiene e il field mask non li chiede.
+Logo e attribuzione Google restano in basso, non coperti; con lo zoom frazionario crescono insieme a tutta la mappa, rimpicciolita da `scale=2`, fra 1 e 2 volte la misura a `scale=1` e mai meno, come un'immagine a `scale=2` ridotta dal browser secondo la documentazione della Static API. I risultati della Routes API si mostrano solo su mappa Google, come chiedono i termini di Google Maps Platform. Con un account di fatturazione nello Spazio Economico Europeo non si possono mostrare descrizione e passi del percorso accanto alla mappa: il riquadro non li contiene e il field mask non li chiede.
 
 ## Licenze
 

@@ -29,7 +29,7 @@ from PIL import Image, ImageDraw
 import gfx_font
 import renderer
 from dithering import PALETTES, PLANE_ORDER
-from map_fit import Viewport
+from map_fit import ZOOM_STEPS, Viewport
 from routes_api import RouteResult
 from static_map import MAX_SCALE, MAX_SIDE
 
@@ -307,7 +307,8 @@ def render_examples(
     info = [
         "+ suffisso della cella",
         f"{routes}, Static {_seconds(static_s)}",
-        f"zoom {layout.viewport.zoom}, scale {layout.scale}, {len(cells)} celle in {_seconds(sum(elapsed.values()))}",
+        f"zoom {layout.viewport.zoom}+{layout.viewport.zoom_steps}/{ZOOM_STEPS}, scale {layout.scale}, "
+        f"{len(cells)} celle in {_seconds(sum(elapsed.values()))}",
         f"{MAX_SIDE}: /route a {MAX_SIDE}x{MAX_SIDE}, ~ stima",
     ]
     summary = [(FONT_TITLE, "Riepilogo")]

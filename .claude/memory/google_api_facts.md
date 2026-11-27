@@ -10,6 +10,8 @@ Fatti confermati sulla documentazione ufficiale Google Maps Platform e render.co
 - L'Italia è nell'elenco ufficiale delle regioni dell'eco-routing in auto.
 - `emissionType`: `GASOLINE`, `DIESEL`, `HYBRID`, `ELECTRIC` (default `GASOLINE`); niente GPL nè metano.
 - Rotta eco uguale alla veloce: una sola rotta con entrambe le etichette `DEFAULT_ROUTE` e `FUEL_EFFICIENT`.
+- Senza `requestedReferenceRoutes` e con `computeAlternativeRoutes` al default la risposta "contains just one route", etichettata `DEFAULT_ROUTE` ("the default 'best' route"), calcolata "without factoring in fuel or energy-efficiency": con `eco=false` il carburante non cambia il tracciato. Con `computeAlternativeRoutes=true` arrivano anche rotte `DEFAULT_ROUTE_ALTERNATE` (sul percorso dell'utente due, da 11,9 e 16,4 km contro 10,5).
+- Static API, pagina "Get Started": un'immagine a `scale=2` in un `img` dimensionato via CSS è un uso descritto ("The browser will downsize the image to the correct size, without loss of quality"); sotto i 180 px di larghezza la mappa ha un logo ridotto. La pagina delle policy specifica della Static API non si trova (404): valgono i Terms §3(b), che vietano di modificare, coprire o togliere l'attribuzione.
 - Field mask obbligatorio (`X-Goog-FieldMask`), chiave in `X-Goog-Api-Key`.
 - SKU: `TRAFFIC_AWARE_OPTIMAL` → Compute Routes **Pro**, 5 000 chiamate gratuite al mese, poi 10 $ ogni mille; `TOLLS` o `TRAFFIC_ON_POLYLINE` → Enterprise. Static Maps Essentials, 10 000 gratuite.
 - Static API: `size` massimo 640x640 a `scale=1` e `scale=2`; `scale=2` raddoppia i pixel a parità di copertura. Zoom intero, URL fino a 16 384 caratteri.

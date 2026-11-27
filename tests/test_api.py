@@ -28,10 +28,13 @@ def client(monkeypatch):
     monkeypatch.setenv("ROUTEFINDER_TOKEN", TOKEN)
     monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "chiave-finta")
     calls = {"routes": 0, "maps": 0}
+    eco_requests = []
 
-    def fake_compute(origin, destination, fuel, api_key):
+    def fake_compute(origin, destination, fuel, api_key, eco=True):
         calls["routes"] += 1
-        return routes_api.parse_response(_route_payload(), datetime(2026, 11, 6, 7, 42, tzinfo=ZoneInfo("Europe/Rome")))
+        eco_requests.append(eco)
+        return routes_api.parse_response(_route_payload(same_eco=not eco),
+                                         datetime(2026, 11, 6, 7, 42, tzinfo=ZoneInfo("Europe/Rome")))
 
     monkeypatch.setattr(main, "compute_routes", fake_compute)
     def fake_map(viewport, key):
@@ -43,6 +46,7 @@ def client(monkeypatch):
     main._image_cache.clear()
     test_client = TestClient(main.app)
     test_client.calls = calls
+    test_client.eco_requests = eco_requests
     return test_client
 
 
@@ -181,6 +185,17 @@ def test_route_cache_avoids_second_google_call(client):
     assert client.calls["routes"] == 1
 
 
+def test_eco_defaults_to_true_and_false_asks_only_the_fastest_route(client):
+    """Senza eco il percorso ha l'alternativa come oggi; eco=false chiede la sola rotta
+    più veloce, con una chiave di cache sua, quindi con una chiamata in più."""
+    headers = {"X-Routefinder-Token": TOKEN}
+    default = client.get(QUERY + "&format=arduino&width=600&height=300", headers=headers)
+    fastest_only = client.get(QUERY + "&format=arduino&width=600&height=300&eco=false", headers=headers)
+    assert default.status_code == fastest_only.status_code == 200
+    assert client.eco_requests == [True, False]
+    assert default.content != fastest_only.content
+
+
 @pytest.mark.parametrize("query", [
     "/route?origin=43.6&destination=43.5,13.3",
     "/route?origin=95,13&destination=43.5,13.3",
@@ -253,7 +268,7 @@ def test_only_route_asks_for_the_stable_layout(client, monkeypatch):
     monkeypatch.setattr(renderer, "route_layout", recording_layout)
     headers = {"X-Routefinder-Token": TOKEN}
     client.get(QUERY + "&width=600&height=300", headers=headers)
-    assert keys == [((43.6158, 13.5189), (43.5, 13.3), "gasoline")]
+    assert keys == [((43.6158, 13.5189), (43.5, 13.3), "gasoline", True)]
     keys.clear()
     assert client.get(EXAMPLE, headers=headers).status_code == 200
     assert keys and all(key is None for key in keys)
@@ -278,7 +293,7 @@ def test_example_cells_match_the_route_composition_without_stable_options(client
     canvas = np.array(Image.open(io.BytesIO(client.get(EXAMPLE, headers=headers).content)).convert("RGB"))
     origin = main.parse_point(examples.ORIGIN, "origin")
     destination = main.parse_point(examples.DESTINATION, "destination")
-    result = main._route_cache.get_or_compute((origin, destination, "gasoline"), None)
+    result = main._route_cache.get_or_compute((origin, destination, "gasoline", True), None)
     grid = examples.grid_for(result, *examples.DEFAULT_CANVAS)
     w, h = grid.cell_w, grid.cell_h
     for index, cell in enumerate(examples.CELLS):

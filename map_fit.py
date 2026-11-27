@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence, Union
 
 import numpy as np
 
@@ -16,6 +16,8 @@ import numpy as np
 TILE_SIZE = 256
 MAX_ZOOM = 18
 MIN_ZOOM = 1
+# Passi dello zoom frazionario per ottava: un passo vale il 2,2% di scala.
+ZOOM_STEPS = 32
 
 # Latitudine oltre la quale Web Mercator diverge; Google taglia la mappa a ~85°.
 _SIN_LAT_LIMIT = 0.9999
@@ -63,13 +65,24 @@ class Marker:
     dy1: int
 
 
+def image_anchor(width: int, height: int, scale: int) -> tuple[float, float]:
+    """
+    Pixel dell'immagine su cui cade il centro della mappa. A scale=2 con una misura
+    dispari la Static API restituisce un pixel in più, che static_map toglie a destra
+    e in basso, quindi il centro resta mezzo pixel oltre la metà della misura.
+    """
+    return math.ceil(width / scale) * scale / 2, math.ceil(height / scale) * scale / 2
+
+
 @dataclass(frozen=True)
 class Viewport:
     """
     Centro e zoom della mappa, nella forma che si passa alla Static API, e la
     proiezione che porta un punto geografico sul pixel dell'immagine restituita.
     `scale` è il parametro omonimo della Static API: a 2 i pixel raddoppiano e
-    la copertura resta la stessa.
+    la copertura resta la stessa. `zoom_steps` aggiunge allo zoom intero una
+    frazione in passi di 1/ZOOM_STEPS di ottava, ottenuta da static_map riducendo
+    una mappa a scale=2.
     """
 
     center_lat: float
@@ -78,17 +91,24 @@ class Viewport:
     width: int
     height: int
     scale: int
+    zoom_steps: int = 0
+
+    @property
+    def magnification(self) -> float:
+        """Ingrandimento oltre lo zoom intero, 1 senza passi frazionari."""
+        return 2 ** (self.zoom_steps / ZOOM_STEPS)
 
     @property
     def pixels_per_world_unit(self) -> float:
-        return float(2 ** self.zoom * self.scale)
+        return float(2 ** self.zoom * self.scale) * self.magnification
 
     def project(self, lat: float, lng: float) -> tuple[float, float]:
         """Pixel dell'immagine, anche frazionario o fuori dai bordi."""
         k = self.pixels_per_world_unit
         cx, cy = world_xy(self.center_lat, self.center_lng)
         x, y = world_xy(lat, lng)
-        return (x - cx) * k + self.width / 2, (y - cy) * k + self.height / 2
+        anchor_x, anchor_y = image_anchor(self.width, self.height, self.scale)
+        return (x - cx) * k + anchor_x, (y - cy) * k + anchor_y
 
 
 def _densify(pixels: np.ndarray) -> np.ndarray:
@@ -118,9 +138,9 @@ def _rect_counts(sat: np.ndarray, x0: np.ndarray, y0: np.ndarray, x1: np.ndarray
 
 @dataclass(frozen=True)
 class _ZoomFit:
-    """Traslazioni di un singolo zoom: angolo della bitmap del tracciato nel mondo
-    (min_x, min_y), sua misura, griglia degli offset (ox, oy) provati e quali sono
-    ammissibili."""
+    """Traslazioni di uno zoom con i suoi passi frazionari: angolo della bitmap del
+    tracciato nel mondo (min_x, min_y), sua misura, griglia degli offset (ox, oy)
+    provati, quali sono ammissibili e pixel per unità di mondo."""
 
     min_x: int
     min_y: int
@@ -129,6 +149,11 @@ class _ZoomFit:
     ox: np.ndarray
     oy: np.ndarray
     feasible: np.ndarray
+    k: float
+
+
+# Zone vietate fisse, oppure in funzione dell'ingrandimento frazionario.
+Forbidden = Union[Sequence[Rect], Callable[[float], Sequence[Rect]]]
 
 
 def fit_viewport(
@@ -136,13 +161,14 @@ def fit_viewport(
     markers: Iterable[Marker],
     width: int,
     height: int,
-    forbidden: Sequence[Rect],
+    forbidden: Forbidden,
     margin: int,
     padding: int,
     scale: int = 1,
     max_zoom: int = MAX_ZOOM,
     min_zoom: int = MIN_ZOOM,
     prefer: Optional[Viewport] = None,
+    fractional: bool = False,
 ) -> Viewport:
     """
     Sceglie lo zoom più alto e, a quello zoom, il centro per cui tracciati e
@@ -155,10 +181,15 @@ def fit_viewport(
     centro dell'immagine. Scendendo di zoom il tracciato si riduce verso un
     punto, quindi un percorso più corto dell'area libera trova sempre posto.
 
-    Con `prefer`, una viewport calcolata in passato per la stessa misura, si
-    prova prima il suo zoom e il suo centro: se sono ancora ammissibili si
-    restituisce `prefer` invariata, così fra due richieste dello stesso percorso
-    la mappa non si sposta nemmeno di un pixel; altrimenti la ricerca è quella normale.
+    Con `fractional` allo zoom intero trovato si aggiunge il passo frazionario più
+    alto ammissibile, cercato per bisezione a partire dal passo 0, che è già
+    ammissibile: il risultato non taglia mai il tracciato. `forbidden` può essere
+    una funzione dell'ingrandimento, per le zone che crescono con la mappa ridotta.
+
+    Con `prefer`, una viewport calcolata in passato per la stessa misura, se zoom e
+    passi coincidono con quelli della ricerca e il suo centro è ancora ammissibile
+    si restituisce `prefer` invariata, così fra due richieste dello stesso percorso
+    la mappa non si sposta nemmeno di un pixel; una scala più alta vince sempre.
     """
     markers = list(markers)
     geo_points = [p for path in paths for p in path] + [(m.lat, m.lng) for m in markers]
@@ -170,11 +201,15 @@ def fit_viewport(
     inset = margin + padding
     if width - 2 * inset < 1 or height - 2 * inset < 1:
         raise ValueError("immagine troppo piccola per il margine richiesto")
+    zones = forbidden if callable(forbidden) else (lambda _magnification: forbidden)
+    anchor_x, anchor_y = image_anchor(width, height, scale)
 
-    def fit_at(zoom: int) -> Optional[_ZoomFit]:
-        """Traslazioni ammissibili a `zoom`; None se a quello zoom il tracciato
-        non sta nell'area libera o nessuna traslazione evita le zone vietate."""
-        k = float(2 ** zoom * scale)
+    def fit_at(zoom: int, steps: int = 0) -> Optional[_ZoomFit]:
+        """Traslazioni ammissibili a `zoom` più `steps` passi frazionari; None se a
+        quella scala il tracciato non sta nell'area libera o nessuna traslazione
+        evita le zone vietate."""
+        magnification = 2 ** (steps / ZOOM_STEPS)
+        k = float(2 ** zoom * scale) * magnification
         # L'ingombro dei soli vertici scarta in fretta gli zoom troppo alti, prima
         # di densificare tracciati che a zoom 18 sono decine di migliaia di pixel.
         vertex_span_x = max(float(np.ptp(wp[:, 0])) for wp in world_paths) * k if world_paths else 0.0
@@ -208,7 +243,7 @@ def fit_viewport(
         oy_values = np.arange(inset, height - inset - box_h + 1)
         ox, oy = np.meshgrid(ox_values, oy_values)
         feasible = np.ones(ox.shape, dtype=bool)
-        for rect in forbidden:
+        for rect in zones(magnification):
             r = rect.expanded(padding)
             counts = _rect_counts(
                 sat,
@@ -222,39 +257,50 @@ def fit_viewport(
             feasible &= (counts == 0) | outside
         if not feasible.any():
             return None
-        return _ZoomFit(min_x, min_y, box_w, box_h, ox, oy, feasible)
+        return _ZoomFit(min_x, min_y, box_w, box_h, ox, oy, feasible, k)
 
-    if (prefer is not None and (prefer.width, prefer.height, prefer.scale) == (width, height, scale)
-            and min_zoom <= prefer.zoom <= max_zoom):
-        kept = fit_at(prefer.zoom)
-        if kept is not None:
-            # Traslazione intera più vicina a quella che il centro di `prefer` dà alla
-            # bitmap di oggi: formula inversa del centro calcolato in fondo alla funzione.
-            k = float(2 ** prefer.zoom * scale)
-            prefer_wx, prefer_wy = world_xy(prefer.center_lat, prefer.center_lng)
-            prefer_ox = int(round(width / 2 + kept.min_x - prefer_wx * k))
-            prefer_oy = int(round(height / 2 + kept.min_y - prefer_wy * k))
-            col, row = prefer_ox - int(kept.ox[0, 0]), prefer_oy - int(kept.oy[0, 0])
-            if 0 <= row < kept.feasible.shape[0] and 0 <= col < kept.feasible.shape[1] and kept.feasible[row, col]:
-                return Viewport(round(prefer.center_lat, 6), round(prefer.center_lng, 6),
-                                prefer.zoom, width, height, scale)
+    def finest_step(zoom: int, found: _ZoomFit) -> tuple[int, _ZoomFit]:
+        """Passo frazionario più alto ammissibile a `zoom`: il limite inferiore si
+        sposta solo su passi provati ammissibili."""
+        low, low_fit, high = 0, found, ZOOM_STEPS
+        while high - low > 1:
+            mid = (low + high) // 2
+            candidate = fit_at(zoom, mid)
+            if candidate is None:
+                high = mid
+            else:
+                low, low_fit = mid, candidate
+        return low, low_fit
 
+    usable_prefer = prefer is not None and (prefer.width, prefer.height, prefer.scale) == (width, height, scale)
     for zoom in range(max_zoom, min_zoom - 1, -1):
         found = fit_at(zoom)
         if found is None:
             continue
-        k = float(2 ** zoom * scale)
+        steps = 0
+        if fractional:
+            steps, found = finest_step(zoom, found)
+        if usable_prefer and (prefer.zoom, prefer.zoom_steps) == (zoom, steps):
+            # Traslazione intera più vicina a quella che il centro di `prefer` dà alla
+            # bitmap di oggi: formula inversa del centro calcolato qui sotto.
+            prefer_wx, prefer_wy = world_xy(prefer.center_lat, prefer.center_lng)
+            col = int(round(anchor_x + found.min_x - prefer_wx * found.k)) - int(found.ox[0, 0])
+            row = int(round(anchor_y + found.min_y - prefer_wy * found.k)) - int(found.oy[0, 0])
+            if 0 <= row < found.feasible.shape[0] and 0 <= col < found.feasible.shape[1] and found.feasible[row, col]:
+                return Viewport(round(prefer.center_lat, 6), round(prefer.center_lng, 6),
+                                zoom, width, height, scale, steps)
+
         distance = ((found.ox + found.box_w / 2 - width / 2) ** 2
                     + (found.oy + found.box_h / 2 - height / 2) ** 2)
         distance = np.where(found.feasible, distance, np.inf)
         row, col = np.unravel_index(int(np.argmin(distance)), distance.shape)
         best_ox, best_oy = int(found.ox[row, col]), int(found.oy[row, col])
 
-        center_wx = (width / 2 - best_ox + found.min_x) / k
-        center_wy = (height / 2 - best_oy + found.min_y) / k
+        center_wx = (anchor_x - best_ox + found.min_x) / found.k
+        center_wy = (anchor_y - best_oy + found.min_y) / found.k
         lat, lng = world_to_latlng(center_wx, center_wy)
         # Sei decimali sono la precisione che va nell'URL: la proiezione usata per
         # disegnare deve partire dallo stesso centro della mappa scaricata.
-        return Viewport(round(lat, 6), round(lng, 6), zoom, width, height, scale)
+        return Viewport(round(lat, 6), round(lng, 6), zoom, width, height, scale, steps)
 
     raise ValueError("tracciato non inquadrabile nemmeno allo zoom minimo")

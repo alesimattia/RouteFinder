@@ -142,21 +142,21 @@ def _check_size(width: int, height: int) -> None:
 
 
 def _cached_route(origin_point: tuple[float, float], destination_point: tuple[float, float],
-                  fuel: str) -> tuple[RouteResult, Optional[float]]:
+                  fuel: str, eco: bool = True) -> tuple[RouteResult, Optional[float]]:
     """Percorso dalla cache di ROUTE_CACHE_TTL_S o da una chiamata alla Routes
     API; il secondo valore è la durata della chiamata, None se non c'è stata.
-    /example la mostra nel riepilogo."""
+    /example la mostra nel riepilogo. Senza `eco` la sola rotta più veloce."""
     api_key = _api_key()
     elapsed: list[float] = []
 
     def call() -> RouteResult:
         started = time.perf_counter()
-        value = compute_routes(origin_point, destination_point, fuel, api_key)
+        value = compute_routes(origin_point, destination_point, fuel, api_key, eco=eco)
         elapsed.append(time.perf_counter() - started)
         return value
 
     try:
-        result = _route_cache.get_or_compute((origin_point, destination_point, fuel), call)
+        result = _route_cache.get_or_compute((origin_point, destination_point, fuel, eco), call)
     except RoutesError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return result, (elapsed[0] if elapsed else None)
@@ -204,6 +204,8 @@ def route(
     origin: Optional[str] = Query(None, description="Partenza, lat,lng in gradi decimali."),
     destination: Optional[str] = Query(None, description="Arrivo, lat,lng in gradi decimali."),
     fuel: Literal["gasoline", "diesel", "hybrid", "electric"] = Query("gasoline"),
+    eco: bool = Query(True, description="Alternativa a minor consumo, se diversa dalla più veloce; "
+                                        "false per il solo percorso più veloce."),
     width: int = Query(MAX_SIDE, description=f"Larghezza in px, al massimo {MAX_SIDE}; senza, la massima."),
     height: int = Query(MAX_SIDE, description=f"Altezza in px, al massimo {MAX_SIDE}; senza, la massima."),
     format: Literal["jpg", "arduino"] = Query("jpg"),
@@ -217,7 +219,8 @@ def route(
 ):
     """
     Percorso più veloce col traffico, con l'alternativa a minor consumo per il
-    carburante se diversa, disegnato su mappa Google.
+    carburante se diversa, disegnato su mappa Google; con eco=false il solo
+    percorso più veloce.
 
     format=jpg (default) è a colori pieni; con colors è un'anteprima nella
     palette e-paper, quantizzata come format=arduino, a soglia se manca
@@ -247,15 +250,15 @@ def route(
     else:
         color_mode, dither_mode = colors, dither or "no"
 
-    result, _ = _cached_route(origin_point, destination_point, fuel)
+    result, _ = _cached_route(origin_point, destination_point, fuel, eco)
     api_key = _api_key()
-    image_key = (origin_point, destination_point, fuel, width, height, format, color_mode,
+    image_key = (origin_point, destination_point, fuel, eco, width, height, format, color_mode,
                  dither_mode, result.computed_at.isoformat())
     try:
         body = _image_cache.get_or_compute(image_key, lambda: render_route_image(
             result, width, height, format, color_mode, dither_mode,
             lambda viewport: fetch_base_map(viewport, api_key),
-            route_key=(origin_point, destination_point, fuel)))
+            route_key=(origin_point, destination_point, fuel, eco)))
     except StaticMapError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     except ValueError as exc:

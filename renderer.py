@@ -44,6 +44,7 @@ ICON_HALO = 2
 CARD_PADDING = 6
 CARD_ROW_GAP = 4
 CARD_ICON_GAP = 5
+CARD_COLUMN_GAP = 10
 CARD_RADIUS = 8
 CARD_BORDER = 2
 
@@ -51,7 +52,8 @@ CARD_BORDER = 2
 DELAY_ALERT_S = 300
 
 # Logo Google in basso a sinistra e attribuzione in basso a destra: misure
-# abbondanti della resa a scale=1, che il tracciato non deve coprire.
+# abbondanti della resa a scale=1, che il tracciato non deve coprire; con lo zoom
+# frazionario crescono con l'ingrandimento, come la mappa ridotta.
 GOOGLE_LOGO = (72, 28)
 GOOGLE_ATTRIBUTION = (210, 16)
 
@@ -64,8 +66,8 @@ FONT_SMALL = "FreeSans9pt7b"
 
 
 @dataclass(frozen=True)
-class CardRow:
-    """Una riga del riquadro: icona Material, testo ASCII, font GFX e colore."""
+class CardItem:
+    """Un elemento del riquadro: icona Material, testo ASCII, font GFX e colore."""
 
     icon: str
     text: str
@@ -74,23 +76,41 @@ class CardRow:
 
 
 @dataclass(frozen=True)
-class CardRowKind:
-    """Una riga possibile del riquadro: icona Material, font GFX e testo di riserva,
-    il più largo realistico che la riga può avere con un tragitto sotto l'ora."""
+class CardRow:
+    """
+    Una riga del riquadro: elemento della colonna sinistra e della colonna destra,
+    ciascuno assente se la riga non lo ha. Una riga senza elemento destro, la riga
+    eco, parte dalla colonna sinistra e può occupare tutta la larghezza.
+    """
+
+    left: Optional[CardItem]
+    right: Optional[CardItem] = None
+
+    def items(self) -> list[CardItem]:
+        return [item for item in (self.left, self.right) if item is not None]
+
+
+@dataclass(frozen=True)
+class CardItemKind:
+    """Un elemento possibile del riquadro: icona Material, font GFX e testo di
+    riserva, il più largo realistico che può avere con un tragitto sotto l'ora."""
 
     icon: str
     font: str
     reserve_text: str
 
 
-# Le righe possibili nell'ordine di lettura. Nel riquadro stabile di /route i testi
-# di riserva fissano la larghezza anche quando la riga ritardo o la riga eco non ci sono.
-DURATION_ROW = CardRowKind("schedule", FONT_MAIN, "59 min")
-DELAY_ROW = CardRowKind("traffic", FONT_BODY, "+59 min")
-DISTANCE_ROW = CardRowKind("straighten", FONT_BODY, "99,9 km")
-ECO_ROW = CardRowKind("eco", FONT_BODY, "+59 min -9,9 L")
-UPDATE_ROW = CardRowKind("update", FONT_SMALL, "agg. 88:88")
-CARD_ROW_KINDS = (DURATION_ROW, DELAY_ROW, DISTANCE_ROW, ECO_ROW, UPDATE_ROW)
+# Gli elementi possibili per colonna. Nel riquadro stabile di /route i testi di
+# riserva fissano le colonne anche quando il ritardo o la riga eco non ci sono.
+DURATION_ITEM = CardItemKind("schedule", FONT_MAIN, "59 min")
+DELAY_ITEM = CardItemKind("traffic", FONT_BODY, "+59 min")
+UPDATE_ITEM = CardItemKind("update", FONT_SMALL, "agg. 88:88")
+DISTANCE_ITEM = CardItemKind("straighten", FONT_BODY, "99,9 km")
+ECO_ITEM = CardItemKind("eco", FONT_BODY, "+59 min -9,9 L")
+LEFT_COLUMN_KINDS = (DURATION_ITEM, DELAY_ITEM)
+RIGHT_COLUMN_KINDS = (UPDATE_ITEM, DISTANCE_ITEM)
+FULL_ROW_KINDS = (ECO_ITEM,)
+CARD_ITEM_KINDS = LEFT_COLUMN_KINDS + RIGHT_COLUMN_KINDS + FULL_ROW_KINDS
 
 # Ultima viewport per percorso e misura: solo centro e zoom, nessun contenuto
 # cartografico, quindi può durare ore senza toccare i termini di Google.
@@ -120,21 +140,23 @@ def format_liters(microliters: int) -> str:
     return f"{microliters / 1e6:.1f}".replace(".", ",") + " L"
 
 
-def _row(kind: CardRowKind, text: str, color: str = "black") -> CardRow:
-    """Riga del riquadro di un tipo noto: icona e font vengono dal tipo."""
-    return CardRow(kind.icon, text, kind.font, color)
+def _item(kind: CardItemKind, text: str, color: str = "black") -> CardItem:
+    """Elemento del riquadro di un tipo noto: icona e font vengono dal tipo."""
+    return CardItem(kind.icon, text, kind.font, color)
 
 
 def card_rows(result: RouteResult) -> list[CardRow]:
-    """Righe del riquadro nell'ordine di lettura: tempo stimato, ritardo,
-    distanza, alternativa eco se esiste, ora del calcolo."""
+    """Righe del riquadro nell'ordine di lettura: tempo stimato e ora del calcolo,
+    ritardo e distanza, alternativa eco se esiste. Senza ritardo la distanza resta
+    nella sua colonna."""
     fastest = result.fastest
-    rows = [_row(DURATION_ROW, format_duration(fastest.duration_s))]
+    rows = [CardRow(_item(DURATION_ITEM, format_duration(fastest.duration_s)),
+                    _item(UPDATE_ITEM, "agg. " + result.computed_at.strftime("%H:%M")))]
     delay = fastest.delay_s
+    delay_item = None
     if delay is not None:
-        rows.append(_row(DELAY_ROW, "+" + format_duration(delay),
-                         "red" if delay >= DELAY_ALERT_S else "black"))
-    rows.append(_row(DISTANCE_ROW, format_distance(fastest.distance_m)))
+        delay_item = _item(DELAY_ITEM, "+" + format_duration(delay), "red" if delay >= DELAY_ALERT_S else "black")
+    rows.append(CardRow(delay_item, _item(DISTANCE_ITEM, format_distance(fastest.distance_m))))
     eco = result.eco
     if eco is not None:
         text = "+" + format_duration(eco.duration_s - fastest.duration_s)
@@ -142,8 +164,7 @@ def card_rows(result: RouteResult) -> list[CardRow]:
             saved = fastest.fuel_microliters - eco.fuel_microliters
             if saved > 0:
                 text += " -" + format_liters(saved)
-        rows.append(_row(ECO_ROW, text))
-    rows.append(_row(UPDATE_ROW, "agg. " + result.computed_at.strftime("%H:%M")))
+        rows.append(CardRow(_item(ECO_ITEM, text)))
     return rows
 
 
@@ -154,56 +175,85 @@ def _icon_side(font: gfx_font.GfxFont) -> int:
     return int(round(font.cap_height * 1.2))
 
 
-def _row_width(font_name: str, text: str) -> int:
-    """Larghezza a scale=1 di una riga: icona, spazio e avanzata del testo, non
-    il suo inchiostro, che cambia di un pixel o due da una cifra all'altra."""
+def _item_width(font_name: str, text: str, ink: bool = False) -> int:
+    """Larghezza a scale=1 di un elemento: icona, spazio e testo. Con `ink` il testo
+    misura il suo inchiostro, altrimenti l'avanzata, che non cambia di un pixel o
+    due da una cifra all'altra."""
     font = gfx_font.load(font_name)
-    return _icon_side(font) + CARD_ICON_GAP + font.advance(text)
+    text_width = font.text_bounds(text)[2] if ink else font.advance(text)
+    return _icon_side(font) + CARD_ICON_GAP + text_width
+
+
+def _row_height(row: CardRow) -> int:
+    """Altezza di una riga: l'icona o le maiuscole più alte fra i suoi elementi."""
+    return max(max(_icon_side(font), font.cap_height) for font in (gfx_font.load(i.font) for i in row.items()))
+
+
+@dataclass(frozen=True)
+class _CardGeometry:
+    """Misura del riquadro a scale=1 e ascissa della colonna destra."""
+
+    width: int
+    height: int
+    right_x: int
+
+
+def _card_geometry(rows: list[CardRow], stable: bool) -> _CardGeometry:
+    """
+    Colonna sinistra, colonna destra e righe piene. La colonna sinistra e le righe
+    piene misurano l'inchiostro del testo reale; la colonna destra l'avanzata,
+    perchè è quella che la allinea a destra. Con `stable` ogni colonna prende anche
+    le avanzate dei testi di riserva, così bordo e colonna destra non si muovono
+    fra due richieste dello stesso percorso e un testo oltre la riserva, per
+    esempio un tragitto di un'ora o più, allarga il riquadro.
+    """
+    ink = not stable
+    left = [_item_width(r.left.font, r.left.text, ink) for r in rows if r.left and r.right]
+    right = [_item_width(r.right.font, r.right.text) for r in rows if r.right]
+    full = [_item_width(r.left.font, r.left.text, ink) for r in rows if r.left and not r.right]
+    if stable:
+        left += [_item_width(k.font, k.reserve_text) for k in LEFT_COLUMN_KINDS]
+        right += [_item_width(k.font, k.reserve_text) for k in RIGHT_COLUMN_KINDS]
+        full += [_item_width(k.font, k.reserve_text) for k in FULL_ROW_KINDS]
+    right_width = max(right, default=0)
+    two_columns = max(left, default=0) + (CARD_COLUMN_GAP + right_width if right_width else 0)
+    width = max(two_columns, max(full, default=0)) + 2 * CARD_PADDING
+    height = sum(_row_height(row) for row in rows) + CARD_ROW_GAP * (len(rows) - 1) + 2 * CARD_PADDING
+    return _CardGeometry(width, height, width - CARD_PADDING - right_width)
 
 
 def card_size(rows: list[CardRow], stable: bool = False) -> tuple[int, int]:
-    """
-    Larghezza e altezza del riquadro a scale=1. La larghezza è quella del testo
-    reale (inchiostro); con `stable` è invece il massimo fra le avanzate dei testi
-    reali e quelle dei testi di riserva di ogni riga possibile, così il bordo sinistro
-    non si muove fra due richieste dello stesso percorso e un testo oltre la riserva,
-    per esempio un tragitto di un'ora o più, allarga il riquadro.
-    """
-    width = max(_row_width(kind.font, kind.reserve_text) for kind in CARD_ROW_KINDS) if stable else 0
-    height = 0
-    for row in rows:
-        font = gfx_font.load(row.font)
-        side = _icon_side(font)
-        if stable:
-            width = max(width, _row_width(row.font, row.text))
-        else:
-            width = max(width, side + CARD_ICON_GAP + font.text_bounds(row.text)[2])
-        height += max(side, font.cap_height)
-    height += CARD_ROW_GAP * (len(rows) - 1)
-    return width + 2 * CARD_PADDING, height + 2 * CARD_PADDING
+    """Larghezza e altezza del riquadro a scale=1; `stable` come in _card_geometry()."""
+    geometry = _card_geometry(rows, stable)
+    return geometry.width, geometry.height
 
 
 def draw_card(rows: list[CardRow], colors: dict[str, object], mode: str,
-              width: Optional[int] = None) -> Image.Image:
-    """Riquadro a scale=1 come immagine a sè, nel modo dell'immagine finale:
-    card bianca ad angoli arrotondati, righe icona più testo su una griglia.
-    `width` è quella del layout (a scale=1); senza, la misura del testo reale."""
-    measured_width, height = card_size(rows)
-    width = measured_width if width is None else width
-    card = Image.new(mode, (width, height), colors["white"])
+              stable: bool = False) -> Image.Image:
+    """
+    Riquadro a scale=1 come immagine a sè, nel modo dell'immagine finale: card
+    bianca ad angoli arrotondati, righe di elementi icona più testo su due colonne,
+    con le icone di ogni colonna allo stesso x. Gli elementi di una riga stanno
+    sulla stessa baseline, quella del font più alto.
+    """
+    geometry = _card_geometry(rows, stable)
+    card = Image.new(mode, (geometry.width, geometry.height), colors["white"])
     if mode == "P":
         card.putpalette(_palette_bytes(colors))
-    ImageDraw.Draw(card).rounded_rectangle((0, 0, width - 1, height - 1), radius=CARD_RADIUS,
+    ImageDraw.Draw(card).rounded_rectangle((0, 0, geometry.width - 1, geometry.height - 1), radius=CARD_RADIUS,
                                            fill=colors["white"], outline=colors["black"], width=CARD_BORDER)
     y = CARD_PADDING
     for row in rows:
-        font = gfx_font.load(row.font)
-        side = _icon_side(font)
-        row_height = max(side, font.cap_height)
-        icon_top = y + (row_height - side) // 2
-        card.paste(colors[row.color], (CARD_PADDING, icon_top), material_icons.mask(row.icon, side))
-        baseline = y + (row_height + font.cap_height) // 2
-        font.draw(card, CARD_PADDING + side + CARD_ICON_GAP, baseline, row.text, colors[row.color])
+        row_height = _row_height(row)
+        baseline = y + (row_height + max(gfx_font.load(i.font).cap_height for i in row.items())) // 2
+        for item, x in ((row.left, CARD_PADDING), (row.right, geometry.right_x)):
+            if item is None:
+                continue
+            font = gfx_font.load(item.font)
+            side = _icon_side(font)
+            card.paste(colors[item.color], (x, baseline - (side + font.cap_height) // 2),
+                       material_icons.mask(item.icon, side))
+            font.draw(card, x + side + CARD_ICON_GAP, baseline, item.text, colors[item.color])
         y += row_height + CARD_ROW_GAP
     return card
 
@@ -276,8 +326,8 @@ def _markers(route: RouteInfo, scale: int) -> list[Marker]:
 @dataclass(frozen=True)
 class RouteLayout:
     """
-    Geometria dell'immagine, uguale per ogni palette e dither: scale della
-    Static API, righe e posizione del riquadro, viewport della mappa. Separata
+    Geometria dell'immagine, uguale per ogni palette e dither: scale del disegno,
+    righe, posizione e tipo di misura del riquadro, viewport della mappa. Separata
     dal disegno perchè examples.py scarica una base sola per viewport e la riusa
     in tutte le celle.
     """
@@ -289,13 +339,15 @@ class RouteLayout:
     card_w: int
     card_h: int
     viewport: Viewport
+    stable_card: bool = False
 
 
 def _stable_viewport(key: Hashable, fit: Callable[[Optional[Viewport]], Viewport]) -> Viewport:
     """
-    Viewport dell'ultimo fit con la stessa chiave se è ancora ammissibile, altrimenti
-    un fit nuovo; il risultato sostituisce la voce in cache e ne rinnova la scadenza.
-    Evita che la mappa si sposti di un pixel fra due richieste dello stesso percorso.
+    Viewport dell'ultimo fit con la stessa chiave se ha ancora la scala più alta
+    ammissibile e un centro ammissibile, altrimenti un fit nuovo; il risultato
+    sostituisce la voce in cache e ne rinnova la scadenza. Evita che la mappa si
+    sposti di un pixel fra due richieste dello stesso percorso.
     """
     computed: list[bool] = []
 
@@ -314,36 +366,43 @@ def route_layout(result: RouteResult, width: int, height: int,
                  route_key: Optional[Hashable] = None) -> RouteLayout:
     """Riquadro in alto a destra e fit della mappa con il tracciato fuori dalle
     zone vietate; ValueError se il riquadro non entra nella misura richiesta.
-    Con `route_key` (origine, destinazione e carburante, che passa solo /route)
-    l'immagine è stabile fra richieste: riquadro a larghezza fissa e viewport
-    dell'ultima richiesta dello stesso percorso e della stessa misura, riusata
-    finchè è ammissibile. Senza (/example) il riquadro è quello del testo reale e
-    il fit parte sempre da zero."""
+    Fino a MAX_SIZE px per lato lo zoom è frazionario, oltre resta intero.
+    Con `route_key` (origine, destinazione, carburante e eco, che passa solo
+    /route) l'immagine è stabile fra richieste: riquadro a larghezza fissa e
+    viewport dell'ultima richiesta dello stesso percorso e della stessa misura,
+    riusata finchè ha la scala più alta ammissibile. Senza (/example) il
+    riquadro è quello del testo reale e il fit parte sempre da zero."""
     scale = scale_for(width, height)
     rows = card_rows(result)
-    card_w, card_h = (v * scale for v in card_size(rows, stable=route_key is not None))
+    stable = route_key is not None
+    card_w, card_h = (v * scale for v in card_size(rows, stable=stable))
     margin = MARGIN * scale
     if card_w + 2 * margin > width or card_h + 2 * margin > height:
         raise ValueError(f"misura {width}x{height} troppo piccola per il riquadro {card_w}x{card_h}")
     card_left, card_top = width - margin - card_w, margin
+    card_zone = Rect(card_left, card_top, card_left + card_w - 1, card_top + card_h - 1).expanded(margin)
 
-    forbidden = [
-        Rect(card_left, card_top, card_left + card_w - 1, card_top + card_h - 1).expanded(margin),
-        Rect(0, height - GOOGLE_LOGO[1] * scale, GOOGLE_LOGO[0] * scale, height - 1),
-        Rect(width - GOOGLE_ATTRIBUTION[0] * scale, height - GOOGLE_ATTRIBUTION[1] * scale, width - 1, height - 1),
-    ]
+    def forbidden(magnification: float) -> list[Rect]:
+        """Zone vietate a un ingrandimento: il riquadro lo disegniamo noi e non
+        cresce, logo e attribuzione crescono con la mappa ridotta."""
+        logo_w, logo_h = (round(v * scale * magnification) for v in GOOGLE_LOGO)
+        attribution_w, attribution_h = (round(v * scale * magnification) for v in GOOGLE_ATTRIBUTION)
+        return [card_zone,
+                Rect(0, height - logo_h, logo_w, height - 1),
+                Rect(width - attribution_w, height - attribution_h, width - 1, height - 1)]
+
     paths = [result.fastest.points] + ([result.eco.points] if result.eco else [])
     markers = _markers(result.fastest, scale)
 
     def fit(prefer: Optional[Viewport]) -> Viewport:
         return fit_viewport(paths, markers, width, height, forbidden, margin=margin,
-                            padding=LINE_PADDING * scale, scale=scale, prefer=prefer)
+                            padding=LINE_PADDING * scale, scale=scale, prefer=prefer, fractional=scale == 1)
 
     if route_key is None:
         viewport = fit(None)
     else:
         viewport = _stable_viewport((route_key, width, height, scale), fit)
-    return RouteLayout(scale, rows, card_left, card_top, card_w, card_h, viewport)
+    return RouteLayout(scale, rows, card_left, card_top, card_w, card_h, viewport, stable)
 
 
 def compose_route_image(result: RouteResult, layout: RouteLayout, base: Image.Image,
@@ -386,7 +445,7 @@ def compose_route_image(result: RouteResult, layout: RouteLayout, base: Image.Im
     _paste_icon(image, colors, "location_on", side_d, int(round(dx)) - side_d // 2,
                 int(round(dy)) - tip, "black", ICON_HALO * scale)
 
-    card = draw_card(layout.rows, colors, mode, layout.card_w // scale)
+    card = draw_card(layout.rows, colors, mode, layout.stable_card)
     if scale != 1:
         card = card.resize((layout.card_w, layout.card_h), Image.NEAREST)
     image.paste(card, (layout.card_left, layout.card_top))
